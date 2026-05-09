@@ -40,9 +40,12 @@ private:
     QString cmdSetMode(const QString& args);
     QString cmdGetVfo();
     QString cmdSetVfo(const QString& arg);
+    QString cmdGetVfoInfo(const QString& arg);
+    QString cmdGetVfoList();
     QString cmdGetPtt();
     QString cmdSetPtt(const QString& arg);
     QString cmdGetInfo();
+    QString cmdGetRigInfo();
     QString cmdGetSplitVfo();
     QString cmdSetSplitVfo(const QString& args);
     QString cmdGetSplitFreq();
@@ -51,14 +54,25 @@ private:
     QString cmdSetSplitMode(const QString& args);
     QString cmdGetLevel(const QString& arg);
     QString cmdSetLevel(const QString& args);
+    QString cmdSetFunc(const QString& args);
+    QString cmdVfoOp(const QString& args);
+    QString cmdSetTrn(const QString& args);
+    QString cmdGetTrn();
     QString cmdDumpState();
     QString cmdSendMorse(const QString& text);  // b <text> / \send_morse
     QString cmdStopMorse();                     // \stop_morse
+    QString cmdWaitMorse();                     // \wait_morse
     QString cmdSetKeySpeed(const QString& arg); // \set_level KEYSPD <wpm>
 
     // Helpers
     SliceModel* currentSlice() const;
+    SliceModel* sliceForVfo(const QString& vfo) const;
     SliceModel* findTxSlice() const;
+    SliceModel* findCatSplitTxSlice() const;
+    SliceModel* ensureCatSplitTxSlice(bool createIfMissing);
+    void applyPendingSplitSettings(SliceModel* txSlice);
+    void requestCatSplitSlice(double initialFreqMhz);
+    double defaultSplitTxFrequencyMhz(const SliceModel* rxSlice) const;
     QString rprt(int code) const;
 
     // Mode conversion tables
@@ -69,6 +83,14 @@ private:
     RadioModel* m_model;
     int  m_sliceIndex{0};
     bool m_extended{false};
+    bool m_catSplitEnabled{false};
+    bool m_catSplitCreatePending{false};
+    bool m_catSplitOwnsTxSlice{false};
+    bool m_hasPendingSplitFreq{false};
+    int m_catSplitRxSliceId{-1};
+    int m_catSplitTxSliceId{-1};
+    double m_pendingSplitFreqMhz{0.0};
+    QString m_pendingSplitMode;
     // Set when a bare `b` / `\send_morse` arrives without inline text.
     // The next line is consumed verbatim as the morse text. Hamlib spec
     // allows this two-line form and Not1MM contest CW relies on it.

@@ -97,6 +97,13 @@ void RigctlServer::onClientData()
     auto* socket = qobject_cast<QTcpSocket*>(sender());
     if (!socket) return;
 
+    processClientData(socket);
+}
+
+void RigctlServer::processClientData(QTcpSocket* socket)
+{
+    if (!socket) return;
+
     // Find the client state
     int idx = -1;
     for (int i = 0; i < m_clients.size(); ++i) {
