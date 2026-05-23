@@ -6862,6 +6862,8 @@ void MainWindow::setupAudioDeviceChangeMonitor()
 {
     m_knownAudioInputIds = audioDeviceIds(QMediaDevices::audioInputs());
     m_knownAudioOutputIds = audioDeviceIds(QMediaDevices::audioOutputs());
+    m_knownDefaultAudioInputId = QMediaDevices::defaultAudioInput().id();
+    m_knownDefaultAudioOutputId = QMediaDevices::defaultAudioOutput().id();
 
     m_audioDeviceChangeTimer.setSingleShot(true);
     m_audioDeviceChangeTimer.setInterval(750);
@@ -6894,6 +6896,10 @@ void MainWindow::handleAudioDeviceListChanged()
 
     const QList<QAudioDevice> inputDevices = QMediaDevices::audioInputs();
     const QList<QAudioDevice> outputDevices = QMediaDevices::audioOutputs();
+    const QAudioDevice defaultInput = QMediaDevices::defaultAudioInput();
+    const QAudioDevice defaultOutput = QMediaDevices::defaultAudioOutput();
+    const QByteArray currentDefaultInputId = defaultInput.id();
+    const QByteArray currentDefaultOutputId = defaultOutput.id();
     const QList<QByteArray> currentInputIds = audioDeviceIds(inputDevices);
     const QList<QByteArray> currentOutputIds = audioDeviceIds(outputDevices);
     const QList<QByteArray> addedInputIds =
@@ -6907,6 +6913,12 @@ void MainWindow::handleAudioDeviceListChanged()
 
     m_knownAudioInputIds = currentInputIds;
     m_knownAudioOutputIds = currentOutputIds;
+    const bool defaultInputChanged =
+        currentDefaultInputId != m_knownDefaultAudioInputId;
+    const bool defaultOutputChanged =
+        currentDefaultOutputId != m_knownDefaultAudioOutputId;
+    m_knownDefaultAudioInputId = currentDefaultInputId;
+    m_knownDefaultAudioOutputId = currentDefaultOutputId;
 
     const QAudioDevice currentInput = m_audio->inputDevice();
     const QAudioDevice currentOutput = m_audio->outputDevice();
@@ -6915,9 +6927,9 @@ void MainWindow::handleAudioDeviceListChanged()
     const bool resetOutputToDefault =
         !currentOutput.isNull() && !audioDevicePresent(outputDevices, currentOutput);
     const bool defaultInputNeedsRestart =
-        currentInput.isNull() && !removedInputIds.isEmpty();
+        currentInput.isNull() && (!removedInputIds.isEmpty() || defaultInputChanged);
     const bool defaultOutputNeedsRestart =
-        currentOutput.isNull() && !removedOutputIds.isEmpty();
+        currentOutput.isNull() && (!removedOutputIds.isEmpty() || defaultOutputChanged);
     const bool resetInput = resetInputToDefault || defaultInputNeedsRestart;
     const bool resetOutput = resetOutputToDefault || defaultOutputNeedsRestart;
     const bool reinitializePcInput = resetInput
