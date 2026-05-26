@@ -130,14 +130,44 @@ jobs:
       - name: Create portable ZIP
         run: |
           # Keep portable ZIP app-local runtime behavior aligned with the installer.
+          # Sanitize github.ref_name — release-tag pushes give a slash-free
+          # "v26.5.3" but workflow_dispatch on a branch ref like
+          # "codex/windows-store-msix" injects slashes that break the
+          # Compress-Archive destination path.  Strip every filesystem-unsafe
+          # character so ad-hoc dispatch runs (e.g. validating new packaging
+          # work on a branch) reach the later Inno + MSIX steps instead of
+          # exiting 1 at the very first artifact-creation step.
           Copy-Item -Path installer-runtime\*.dll -Destination deploy\ -Force
-          Compress-Archive -Path deploy\* -DestinationPath "AetherSDR-${{ github.ref_name }}-Windows-x64-portable.zip"
+          $safeRefName = "${{ github.ref_name }}" -replace '[\\/:*?"<>|]', '_'
+          Compress-Archive -Path deploy\* -DestinationPath "AetherSDR-$safeRefName-Windows-x64-portable.zip"
 
       - name: Create installer (Inno Setup)
         run: |
-          $version = "${{ github.ref_name }}" -replace '^v', ''
+          # Same sanitization as the portable ZIP step — Inno also pukes on
+          # filesystem-unsafe characters in /DAPP_VERSION.
+          $version = "${{ github.ref_name }}" -replace '^v', '' -replace '[\\/:*?"<>|]', '_'
           $runtimeDir = (Resolve-Path "installer-runtime").Path
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAPP_VERSION=$version "/DVC_RUNTIME_DIR=$runtimeDir" packaging\windows\installer.iss
+
+      # MSIX runs AFTER the portable ZIP + Inno installer steps and is
+      # gated with continue-on-error so a future MSIX hiccup (missing SDK
+      # tool on a runner image bump, signtool flake, etc.) can't gate the
+      # established portable-zip + Inno installer delivery path that real
+      # users depend on.  When MSIX matures we can promote it back into
+      # the hard-required artifact set.
+      - name: Create MSIX package
+        continue-on-error: true
+        env:
+          AETHERSDR_MSIX_IDENTITY_NAME: ${{ vars.AETHERSDR_MSIX_IDENTITY_NAME }}
+          AETHERSDR_MSIX_PUBLISHER: ${{ vars.AETHERSDR_MSIX_PUBLISHER }}
+          AETHERSDR_MSIX_DISPLAY_NAME: ${{ vars.AETHERSDR_MSIX_DISPLAY_NAME }}
+          AETHERSDR_MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.AETHERSDR_MSIX_PUBLISHER_DISPLAY_NAME }}
+          AETHERSDR_MSIX_DESCRIPTION: ${{ vars.AETHERSDR_MSIX_DESCRIPTION }}
+          AETHERSDR_MSIX_BACKGROUND_COLOR: ${{ vars.AETHERSDR_MSIX_BACKGROUND_COLOR }}
+          AETHERSDR_MSIX_INSTALLER_ACCENT_COLOR: ${{ vars.AETHERSDR_MSIX_INSTALLER_ACCENT_COLOR }}
+          AETHERSDR_MSIX_INSTALLER_BACKGROUND_COLOR: ${{ vars.AETHERSDR_MSIX_INSTALLER_BACKGROUND_COLOR }}
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File packaging\windows\create-msix.ps1 -DeployDir deploy -OutputDir . -CreateUpload -SkipSign
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
@@ -146,6 +176,8 @@ jobs:
           path: |
             AetherSDR-*.zip
             AetherSDR-*-setup.exe
+            AetherSDR-*.msix
+            AetherSDR-*.msixupload
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
