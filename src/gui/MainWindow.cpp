@@ -199,6 +199,14 @@
 #else
 #include <sys/resource.h>
 #endif
+#ifdef Q_OS_MAC
+// Used by the status-bar memory readout: task_info(TASK_VM_INFO) yields
+// phys_footprint, which is the value Activity Monitor displays and the
+// kernel's resource-pressure system actually consults (see #3197).
+#include <mach/mach.h>
+#include <mach/task.h>
+#include <mach/task_info.h>
+#endif
 #include <QLocale>
 #include <QFile>
 #include <QStandardPaths>
@@ -9094,7 +9102,11 @@ void MainWindow::buildUI()
         m_memLabel = new QLabel("Mem: \u2014");
         AetherSDR::ThemeManager::instance().applyStyleSheet(m_memLabel, "QLabel { color: {{color.text.label}}; font-size: 12px; }");
         m_memLabel->setAlignment(Qt::AlignCenter);
-        m_memLabel->setToolTip("AetherSDR process memory (RSS)");
+#ifdef Q_OS_MAC
+        m_memLabel->setToolTip("AetherSDR process physical footprint (matches Activity Monitor)");
+#else
+        m_memLabel->setToolTip("AetherSDR process resident set size (RSS)");
+#endif
         cpuVbox->addWidget(m_cpuLabel);
         cpuVbox->addWidget(m_memLabel);
         hbox->addWidget(cpuStack);
@@ -9151,23 +9163,48 @@ void MainWindow::buildUI()
                 m_cpuLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 12px; }").arg(color));
             }
 
-            // Memory (RSS)
+            // Memory: report what the OS sees right now (not the high-water
+            // mark) so the value matches platform task managers. See #3197.
 #ifdef Q_OS_WIN
+            // WorkingSetSize is current, not peak.
             PROCESS_MEMORY_COUNTERS pmc;
             if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
                 double mb = pmc.WorkingSetSize / (1024.0 * 1024.0);
                 m_memLabel->setText(QString("Mem: %1 MB").arg(static_cast<int>(mb)));
             }
-#else
-            // getrusage ru_maxrss is in KB on Linux, bytes on macOS
-            struct rusage ruMem;
-            if (getrusage(RUSAGE_SELF, &ruMem) == 0) {
-#ifdef Q_OS_MAC
-                double mb = ruMem.ru_maxrss / (1024.0 * 1024.0);
-#else
-                double mb = ruMem.ru_maxrss / 1024.0;
-#endif
+#elif defined(Q_OS_MAC)
+            // phys_footprint is what Activity Monitor's "Memory" column shows
+            // and what the kernel's resource-pressure system actually uses.
+            // getrusage(ru_maxrss) is a high-water mark of anonymous RSS only
+            // and excludes compressed pages, IOKit/Metal mappings, and
+            // purgeable pages — which together dominate a Qt+QRhi process's
+            // footprint on Apple Silicon (3.8× underreport observed in #3197).
+            task_vm_info_data_t vmInfo{};
+            mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+            if (task_info(mach_task_self(), TASK_VM_INFO,
+                          reinterpret_cast<task_info_t>(&vmInfo), &count) == KERN_SUCCESS) {
+                double mb = vmInfo.phys_footprint / (1024.0 * 1024.0);
                 m_memLabel->setText(QString("Mem: %1 MB").arg(static_cast<int>(mb)));
+            }
+#else
+            // Linux: read VmRSS from /proc/self/status for current resident
+            // set size. getrusage(ru_maxrss) on Linux is a high-water mark in
+            // KB and never decreases, so it diverges from what `top`/`htop`
+            // show as the process shrinks.
+            QFile statusFile("/proc/self/status");
+            if (statusFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                const QByteArray contents = statusFile.readAll();
+                const int idx = contents.indexOf("VmRSS:");
+                if (idx >= 0) {
+                    const QByteArray line = contents.mid(idx, contents.indexOf('\n', idx) - idx);
+                    // Format: "VmRSS:\t   <kb> kB"
+                    bool ok = false;
+                    const qulonglong kb = line.mid(6).trimmed().split(' ').first().toULongLong(&ok);
+                    if (ok) {
+                        double mb = kb / 1024.0;
+                        m_memLabel->setText(QString("Mem: %1 MB").arg(static_cast<int>(mb)));
+                    }
+                }
             }
 #endif
         });
