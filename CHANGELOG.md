@@ -6,6 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 > **Versioning:** Starting with **v26.5.1**, AetherSDR moves to **CalVer**
 > (`YY.M.patch`). Earlier tags used semver through v0.9.8.
 
+## [v26.6.1.1] — 2026-06-02
+
+### Hotfix: macOS DMG release build + two GUI fixes
+
+Three fixes on top of v26.6.1, no other changes:
+
+- **fix(ci): unblock macOS DMG build broken by missing background image
+  (#3349)** — the `create-dmg` invocation referenced
+  `docs/assets/logo-invert.png`, which had been removed; the trailing
+  `|| true` masked the failure and Sign DMG then failed on a DMG that was
+  never produced. Drops the missing `--background`, adds an explicit
+  `test -f` guard.
+- **fix(gui): only toast "Step: …" on deliberate step changes, not radio
+  syncs (#3337)** — the tuning-step toast no longer fires on radio-driven
+  status syncs, only on deliberate user step changes.
+- **fix(radio-setup): wrap tab pages in QScrollArea so tall tabs stay
+  reachable (#3347)** — tall Radio Setup tabs are scrollable instead of
+  clipping controls off-screen.
+
 ## [v26.6.1] — 2026-06-01
 
 ### HID input devices + Windows hardening + new protocol surfaces + 143-commit reliability sweep

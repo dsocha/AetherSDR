@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(AetherSDR VERSION 26.6.1 LANGUAGES C CXX)
+project(AetherSDR VERSION 26.6.1.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -1243,7 +1243,9 @@ if(HIDAPI_FOUND)
         src/core/HidEncoderManager.cpp
         src/core/HidEncoderManager.h
         src/core/HidDeviceParser.cpp
-        src/core/HidDeviceParser.h)
+        src/core/HidDeviceParser.h
+        src/gui/RC28MappingDialog.cpp
+        src/gui/RC28MappingDialog.h)
     set(HIDAPI_NORMALIZED_INCLUDE_DIRS ${HIDAPI_INCLUDE_DIRS})
     foreach(hidapi_dir IN LISTS HIDAPI_INCLUDE_DIRS)
         if(EXISTS "${hidapi_dir}/hidapi.h")
