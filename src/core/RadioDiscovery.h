@@ -102,12 +102,26 @@ public:
     static constexpr int BIND_RETRY_MS      = 2000;  // retry interval when bind fails
     static constexpr int MAX_BIND_RETRIES   = 15;    // give up after 30s (15 × 2s)
     static constexpr int REBIND_INTERVAL_MS = 5000;  // re-bind interval until first packet received
+    static constexpr int MAX_REBIND_RETRIES = 12;    // give up re-bind after 60s (12 × 5s)
 
     explicit RadioDiscovery(QObject* parent = nullptr);
     ~RadioDiscovery() override;
 
     void startListening();
     void stopListening();
+
+    // Couple discovery's re-bind loop to the connection lifecycle.  When a
+    // radio is connected we stop the 5-second re-bind churn for the rest of
+    // the session (#3420).  `remote` selects how aggressively to quiesce:
+    //   • local (remote=false): keep the socket bound and the stale sweep
+    //     running so Multi-Flex / other-GUI-client broadcasts still refresh
+    //     the radio list passively; only the re-bind churn stops.
+    //   • routed/VPN/SmartLink (remote=true): local UDP broadcasts cannot
+    //     reach us by design, so passive listening buys nothing — fully
+    //     quiesce by stopping the stale sweep and releasing the socket.
+    // On disconnect, discovery resumes (re-bind with a fresh retry budget) so
+    // the next connection — possibly a different local radio — can be found.
+    void setConnected(bool connected, bool remote);
 
     QList<RadioInfo> discoveredRadios() const { return m_radios; }
 
@@ -130,7 +144,9 @@ private:
     QTimer            m_bindRetryTimer;  // retries bind if first attempt fails (e.g. macOS net consent)
     QTimer            m_rebindTimer;     // periodic re-bind until first packet (handles interface changes)
     int               m_bindRetryCount{0};
+    int               m_rebindAttempts{0}; // count of re-bind firings, capped at MAX_REBIND_RETRIES (#3420)
     bool              m_receivedAny{false};
+    bool              m_connected{false};  // active radio connection — pauses re-bind churn (#3420)
     QList<RadioInfo>  m_radios;
 
     // Track last-seen time per serial for staleness detection
