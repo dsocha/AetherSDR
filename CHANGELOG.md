@@ -6,6 +6,152 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 > **Versioning:** Starting with **v26.5.1**, AetherSDR moves to **CalVer**
 > (`YY.M.patch`). Earlier tags used semver through v0.9.8.
 
+## [v26.6.2] — 2026-06-07
+
+### Theming + HID controllers + packet-radio suite + Windows Store + 206-commit consolidation
+
+206 commits across 18 contributors since v26.5.3. This is a consolidated
+**v26.6.2** that rolls up the 26.6.1 feature wave, the v26.6.1.1 hotfixes,
+and a large block of new work landed since — headlined by the runtime
+theming system, three new HID controller classes, a full packet-radio
+suite (KISS TNC, connected-mode BBS terminal, and a personal mailbox),
+and the Microsoft Store (MSIX) packaging path for one-click install and
+automatic updates on Windows.
+
+### Theming foundation (early beta)
+
+A runtime theming system, opt-in via **Settings → Theme Editor**; Default
+Dark remains the shipped default. Token names, the `.aethertheme` format,
+and the editor UX are expected to change before stabilising — file issues
+with the `theme` label if you try it.
+
+- `ThemeManager` foundation + 51-token design taxonomy, gradient + alpha support
+- Theme Editor dialog with live colour editing, gradient editor, font + sizing pickers
+- New **Default Light** theme; `.aethertheme` import/export with drag-and-drop
+- Embedded DSEG Modern 7- and 14-segment fonts (SIL OFL 1.1)
+
+### HID input devices
+
+Three new physical-device classes, all opt-in so the macOS Input
+Monitoring prompt never surfaces unless an operator enables one:
+
+- **Elgato StreamDeck+** — encoders, LCD buttons, touchscreen with live labels (#3236)
+- **Ulanzi Dial** — cross-platform on Linux evdev, Windows, and macOS (#3238, #3239)
+- **Native Icom RC-28** encoder support (#3293, #3298)
+
+### Packet radio — KISS TNC, BBS terminal & mailbox
+
+AetherModem grows from a decoder into a complete packet station, all over
+its built-in 1200-baud VHF (Bell 202) AFSK modem — no external TNC
+hardware required:
+
+- **KISS-over-TCP TNC server (#3279)** — turns AetherSDR into a software TNC
+  for any host packet/APRS app (Xastir, YAAC, APRSdroid, UISS, Dire
+  Wolf-style clients, terminal programs). Cross-platform `QTcpServer` with
+  multiple simultaneous clients, resync-safe KISS framing (FEND/FESC), and
+  proper lifecycle handling — TCP keepalive, slow-consumer write-backlog
+  cap, and an idle sweep so dead clients are reaped, not leaked. **Enable
+  TNC**, **Start on Startup**, and **TCP port** (default 8001) controls,
+  all persisted.
+- **Standalone packet terminal (#3381)** — a built-in connected-mode AX.25
+  client in a new Terminal tab: call a 1200-baud VHF packet BBS, read and
+  send messages, and disconnect, with reliable error correction (T1
+  retries) over the half-duplex link. Verified on the air against a live
+  BBS (SJVBBS-1).
+- **Personal Mailbox System (PMS)** — the answering-side counterpart: your
+  own connected-mode AX.25 mailbox other stations can connect to, sharing
+  the same `Ax25Connection` data-link state machine as the terminal.
+- Built on the **AX.25 1200-baud VHF (Bell 202) RX + TX** profiles from
+  earlier in the cycle (#3253, #3256).
+
+### Windows Store — one-click install & automatic updates
+
+AetherSDR is heading to the Microsoft Store as an MSIX package, so Windows
+operators get one-click installation and automatic background updates
+instead of chasing installers:
+
+- **MSIX packaging groundwork + Store app identity** (#3178, #3225)
+- **Lean Store payload** — DFNR neural-denoiser weights embedded for the
+  Store build, with the model archive excluded from the MSIX package to
+  keep it small (#3225, #3205)
+- **CI builds and attaches the MSIX / `.msixupload`** to every release,
+  with the Store-submission automation plan documented (#3281)
+
+### Other new work since v26.6.1
+
+- **Accessibility, Phase 2 (#3303)** — accessible widget names, live
+  screen-reader announcements, VFO tab navigation, and full keyboard
+  navigation.
+- **Ulanzi Studio sibling plugin (#3227)** — `ulanzi-aethersdr` alongside
+  the in-app mapper.
+- **Filter passband shading fix (#3294)** — premultiplied-alpha
+  double-multiply on the GPU path corrected.
+
+### Hotfixes folded in (originally v26.6.1.1)
+
+- **macOS DMG release build unblocked (#3349)** — a removed background image
+  plus a masked `|| true` broke create-dmg; Apple Silicon DMG now builds,
+  signs, and notarizes cleanly.
+- **Tuning-step toast no longer fires on radio syncs (#3337)**.
+- **Radio Setup tall tabs stay reachable (#3347)** — tab pages wrapped in a
+  scroll area.
+
+### Windows hardening
+
+- PerMonitorV2 DPI awareness (#3208), discrete-GPU preference on hybrid laptops (#3299)
+- Windows Snap restoration for the frameless title bar (#3069), WASAPI CW sidetone routing (#3241)
+
+### New protocol surfaces
+
+- **SmartCAT TCP server** — TS-2000 + FlexCAT dialects (#3131)
+- **Unified RADE TX pipeline** — EOO frame transmission + callsign encoding (#3221)
+- **SSDR-parity PWR/SWR metering** on PGXL/TGXL amplifier applets (#3277)
+- TCI `clicked_on_spot` event for Log4OM interoperability (#3145)
+
+### Reliability sweep
+
+- **Faster connect times** — ~1.3 s cut off the connect handshake by
+  skipping the peek when multiFLEX is on and pipelining the serial
+  subscriptions (#3391)
+- **Steadier discovery** — the re-bind loop now pauses while connected and
+  fully quiesces on routed/WAN links, so reconnects stop fighting the
+  discovery socket (#3420, #3422)
+- **7-year-old NR2 Gamma crackling fix** — SpectralNR Bessel function variants corrected (#3275)
+- **Multi-monitor main-window restore under Minimal Mode** (#3174)
+- **Multi-pan TCI spot freeze** — spot-marker rebuilds coalesced (#3310)
+- **FreeDV / Quindar interactions** (#3317, #3320) + RADE filter passband alignment (#3301)
+
+### Build, CI, and packaging
+
+- **`check-windows` + `check-macos` always run** on every PR (#3244)
+- **Sanitizer step pinned to bash** so `pipefail` works (#3155); **SOURCE_DATE_EPOCH** reproducible builds (#3165)
+- **System-library opt-in flags** + lowercase binary name + Linux 256×256 icon + `.desktop` description (#3135, #3138, #3143, #3074 — @dawkagaming)
+- **Debian multiarch tuple for Qt6GuiPrivate probe** (#3159 — @K5PTB)
+
+### Contributors
+
+Big thanks to **@ten9876** (maintainer, 45 commits — theming system
+end-to-end, HID device backends, CI gating), **@aethersdr-agent** (the
+AetherClaude orchestrator, 39 commits — automated fixes across slices,
+controllers, and applet paths), **@jensenpat** (38 commits — the entire
+packet-radio suite: KISS TNC, BBS terminal, PMS mailbox, AX.25 1200-baud,
+plus UI and slice work), **@M7HNF-Ian** (15 commits — meters, WASAPI
+sidetone, spectrum tooltips, CI paths), **@NF0T** (13 commits — RADE TX
+pipeline, NR2 Gamma fix, Quindar interactions), **@K5PTB** (9 commits —
+SmartCAT server, MQTT publish topics, Debian multiarch), **@nigelfenton**
+(9 commits — TCI mic/AF handlers, theme namespaces, Ulanzi sibling
+plugin), **@chibondking** (6 commits — PWR/SWR metering, adaptive
+throttle), **@rfoust** (4 commits — panadapter context slice, waterfall
+rate), **@mvanhorn** (2 commits — theme migration tool cleanup), and
+**@Ozy311** (2 commits — meters + slices). Dependabot contributed 2
+dependency and security bumps.
+
+We are excited to welcome our first-time contributors this cycle:
+**@dawkagaming**, **@w5jwp**, **@motoham88**, **@w9fyi**, **@ea5wa**,
+**@svabi79**, and **@VU3ESV**.
+
+73, Pat KI6BCJ & Claude (AI dev partner)
+
 ## [v26.6.1.1] — 2026-06-02
 
 ### Hotfix: macOS DMG release build + two GUI fixes
