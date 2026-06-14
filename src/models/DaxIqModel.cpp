@@ -146,6 +146,7 @@ void DaxIqModel::setSampleRate(int channel, int rate)
 {
     int idx = channelIndex(channel);
     if (idx < 0 || idx >= NUM_CHANNELS) return;
+    m_desiredRate[idx] = rate;   // remember even if the stream isn't up yet
     if (!m_streams[idx].exists || m_streams[idx].streamId == 0) return;
     emit commandReady(QString("stream set 0x%1 daxiq_rate=%2")
         .arg(m_streams[idx].streamId, 0, 16).arg(rate));
@@ -202,11 +203,39 @@ void DaxIqModel::applyStreamStatus(quint32 streamId, const QMap<QString, QString
             });
         }
     }
+
+    // If the user selected a non-default rate before enabling, the radio creates
+    // the stream at its 48k default; re-apply the desired rate now that it exists
+    // (proven path: "stream set ... daxiq_rate="). The rate-change status it
+    // produces flows back through the guard above and rebuilds the pipe at rate.
+    const bool reapplyPending = (isNew && m_desiredRate[idx] != s.sampleRate);
+    if (reapplyPending) {
+        emit commandReady(QStringLiteral("stream set 0x%1 daxiq_rate=%2")
+            .arg(s.streamId, 0, 16).arg(m_desiredRate[idx]));
+    }
+    // The stream is "rate-settling" until its actual sampleRate reaches the
+    // user's desired rate; the applet holds its rate combo at the user's
+    // selection until then. Track the rate GAP itself — not reapplyPending/isNew
+    // — so an interleaved non-rate status (e.g. a pan bind arriving between the
+    // create-status at 48k and the rate echo) can't prematurely clear the flag
+    // and flicker the combo to 48k. Self-clears on the status that actually
+    // carries the rate (s.sampleRate is updated by the pipe-rebuild block above
+    // before this point). If the radio never echoes the rate, it stays set and
+    // the combo simply keeps showing the user's selection — cosmetic, and the
+    // On/Off button + meter are already correct via their own gates.
+    s.rateSettling = (m_desiredRate[idx] != s.sampleRate);
+
     if (kvs.contains("pan"))
         s.panId = kvs["pan"];
     if (kvs.contains("active"))
         s.active = kvs["active"] == "1";
 
+    // Emit unconditionally so the On/Off button and meter gating sync the moment
+    // the stream exists — even during the transient 48k state. Suppressing it
+    // (as before) left a channel stuck "Off" with the meter pinned at 0 whenever
+    // the radio rejected or never echoed the daxiq_rate re-apply, despite IQ
+    // flowing. The applet suppresses only the *combo* sync while rateSettling, so
+    // the user's rate selection still never visibly flips to 48k.
     emit streamChanged(s.channel);
 }
 
@@ -224,6 +253,29 @@ void DaxIqModel::handleStreamRemoved(quint32 streamId)
             qCDebug(lcProtocol) << "DaxIqModel: removed IQ stream ch" << ch;
             return;
         }
+    }
+}
+
+void DaxIqModel::handleDisconnect()
+{
+    // The radio won't send a per-stream "removed" status on a hard disconnect,
+    // so tear every IQ stream down here (mirroring handleStreamRemoved): reset
+    // the struct but keep the 1-based channel index, and destroy the pipe on the
+    // worker thread. m_desiredRate is intentionally preserved — it's the user's
+    // rate selection, re-applied by the applet's restore-on-reconnect. Leaving
+    // exists stale here is what made restoreEnabledChannels() skip persisted
+    // channels after a reconnect (shown "On" with no stream). (#3522)
+    for (int i = 0; i < NUM_CHANNELS; ++i) {
+        if (!m_streams[i].exists && m_streams[i].streamId == 0)
+            continue;  // already clear
+        int ch = m_streams[i].channel;
+        m_streams[i] = IqStream{};
+        m_streams[i].channel = ch;
+        QMetaObject::invokeMethod(m_worker, [this, ch] {
+            m_worker->destroyPipe(ch);
+        });
+        emit streamChanged(ch);
+        qCDebug(lcProtocol) << "DaxIqModel: reset IQ stream ch" << ch << "on disconnect";
     }
 }
 

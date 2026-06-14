@@ -32,6 +32,10 @@ public:
         QString panId;
         bool    active{false};
         bool    exists{false};
+        bool    rateSettling{false}; // true while a non-default daxiq_rate re-apply
+                                     // is in flight: the stream reports the radio's
+                                     // 48k default transiently, so the applet holds
+                                     // its rate combo until the real rate arrives.
     };
 
     explicit DaxIqModel(QObject* parent = nullptr);
@@ -53,6 +57,13 @@ public:
     void applyStreamStatus(quint32 streamId, const QMap<QString, QString>& kvs);
     void handleStreamRemoved(quint32 streamId);
 
+    // Radio disconnected: reset all IQ stream state and destroy pipes. A hard
+    // disconnect never delivers a per-stream "removed" status, so without this
+    // the stale exists/streamId survive into the next session and the applet's
+    // restore-on-reconnect skips re-creating the persisted channels — leaving
+    // them shown "On" with no stream on the radio. (#3522)
+    void handleDisconnect();
+
     // Feed raw IQ packet from PanadapterStream (main thread → worker thread)
     void feedRawIqPacket(int channel, const QByteArray& rawPayload, int sampleRate);
 
@@ -68,6 +79,7 @@ private:
     void relayIqSamples(int channel, const QByteArray& iqBytes, int sampleRate);
 
     IqStream m_streams[NUM_CHANNELS];  // index 0-3 for channels 1-4
+    int      m_desiredRate[NUM_CHANNELS]{48000, 48000, 48000, 48000};  // user-selected rate, applied after (re)create
     int m_capacity{0};
     int m_available{0};
 
