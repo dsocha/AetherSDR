@@ -4,6 +4,7 @@
 #include "core/AppSettings.h"
 #include "core/DaxTxPolicy.h"
 #include "core/LogManager.h"
+#include "core/MaidenheadLocator.h"
 #include "core/ThemeManager.h"
 #include "core/aprs/AprsBeacon.h"
 #include "core/aprs/AprsMessenger.h"
@@ -2997,6 +2998,13 @@ void Ax25HfPacketDecodeDialog::buildAprsUi(QWidget* page, QVBoxLayout* pageLayou
     m_aprsPositionValue = new QLabel(configFrame);
     m_aprsPositionValue->setObjectName(QStringLiteral("StatusValue"));
     posRow->addWidget(m_aprsPositionValue, 1);
+    posRow->addWidget(sectionLabel(QStringLiteral("GRID"), configFrame));
+    m_aprsManualGrid = new QLineEdit(configFrame);
+    m_aprsManualGrid->setPlaceholderText(QStringLiteral("JN48Qm"));
+    m_aprsManualGrid->setMaximumWidth(90);
+    m_aprsManualGrid->setToolTip(
+        QStringLiteral("Maidenhead grid locator — fills the LAT/LON fields"));
+    posRow->addWidget(m_aprsManualGrid);
     posRow->addWidget(sectionLabel(QStringLiteral("MANUAL LAT"), configFrame));
     m_aprsManualLat = new QLineEdit(configFrame);
     m_aprsManualLat->setPlaceholderText(QStringLiteral("48.2700"));
@@ -3013,6 +3021,17 @@ void Ax25HfPacketDecodeDialog::buildAprsUi(QWidget* page, QVBoxLayout* pageLayou
         new QDoubleValidator(-180.0, 180.0, 6, m_aprsManualLon));
     m_aprsManualLon->setText(AprsSettings::manualLon());
     posRow->addWidget(m_aprsManualLon);
+
+    // Lat/lon is the persisted source of truth; derive the grid box from it on
+    // open so it round-trips instead of showing blank. Nothing extra is stored.
+    {
+        bool initLatOk = false, initLonOk = false;
+        const double initLat = m_aprsManualLat->text().toDouble(&initLatOk);
+        const double initLon = m_aprsManualLon->text().toDouble(&initLonOk);
+        if (initLatOk && initLonOk)
+            m_aprsManualGrid->setText(MaidenheadLocator::toMaidenhead(initLat, initLon));
+    }
+
     config->addLayout(posRow, 2, 0, 1, 7);
     pageLayout->addWidget(configFrame);
 
@@ -3087,6 +3106,22 @@ void Ax25HfPacketDecodeDialog::buildAprsUi(QWidget* page, QVBoxLayout* pageLayou
             this, [this](int) { applyAprsConfigFromUi(true); });
     connect(m_aprsBeaconText, &QLineEdit::editingFinished,
             this, [this] { applyAprsConfigFromUi(true); });
+    connect(m_aprsManualGrid, &QLineEdit::editingFinished,
+            this, [this] {
+        const QString grid = m_aprsManualGrid->text().trimmed();
+        if (grid.isEmpty())
+            return;
+        double lat = 0.0, lon = 0.0;
+        if (!MaidenheadLocator::toLatLon(grid, lat, lon)) {
+            m_aprsManualGrid->setStyleSheet(
+                QStringLiteral("QLineEdit { color: #c04040; }"));
+            return;
+        }
+        m_aprsManualGrid->setStyleSheet(QString());
+        m_aprsManualLat->setText(QString::number(lat, 'f', 4));
+        m_aprsManualLon->setText(QString::number(lon, 'f', 4));
+        applyAprsConfigFromUi(true);
+    });
     connect(m_aprsManualLat, &QLineEdit::editingFinished,
             this, [this] { applyAprsConfigFromUi(true); });
     connect(m_aprsManualLon, &QLineEdit::editingFinished,

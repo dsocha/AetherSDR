@@ -270,6 +270,7 @@ private:
     QLineEdit* m_aprsBeaconText{nullptr};
     QPushButton* m_aprsBeaconNow{nullptr};
     QLabel* m_aprsPositionValue{nullptr};
+    QLineEdit* m_aprsManualGrid{nullptr};
     QLineEdit* m_aprsManualLat{nullptr};
     QLineEdit* m_aprsManualLon{nullptr};
     QLineEdit* m_aprsMsgTo{nullptr};
