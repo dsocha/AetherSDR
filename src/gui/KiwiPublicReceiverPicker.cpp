@@ -13,6 +13,15 @@
 namespace AetherSDR {
 
 namespace {
+
+// Session-scoped cache of the last successful directory fetch, shared across
+// every picker instance opened this run.  Being a process-static, it is NOT
+// persisted to disk — it dies with the app, so a new session always starts
+// fresh.  This is what lets repeat "Browse public…" opens re-serve the list
+// without hitting the operators' servers again; "Refresh list" overwrites it.
+QVector<KiwiPublicReceiver> g_sessionCache;
+bool g_haveSessionCache = false;
+
 // "http://host:port" -> "host:port" (what KiwiSdrClient::normalizeEndpoint wants).
 QString endpointFromUrl(const QString& url)
 {
@@ -38,7 +47,8 @@ KiwiPublicReceiverPicker::KiwiPublicReceiverPicker(QWidget* parent)
     m_search->setPlaceholderText(tr("Filter by name, location, or host…"));
     m_search->setClearButtonEnabled(true);
     topRow->addWidget(m_search, 1);
-    m_refresh = new QPushButton(tr("Refresh"));
+    m_refresh = new QPushButton(tr("Refresh list"));
+    m_refresh->setToolTip(tr("Re-fetch the public directory from the network."));
     topRow->addWidget(m_refresh);
     outer->addLayout(topRow);
 
@@ -79,11 +89,19 @@ KiwiPublicReceiverPicker::KiwiPublicReceiverPicker(QWidget* parent)
         m_refresh->setEnabled(true);
     });
 
-    startFetch();  // opening the picker IS the explicit user action -> one fetch
+    // Re-serve the session cache if we already fetched once this run; only the
+    // first browse (or an explicit "Refresh list") touches the network.
+    if (g_haveSessionCache) {
+        m_fromCache = true;
+        onReady(g_sessionCache);
+    } else {
+        startFetch();
+    }
 }
 
 void KiwiPublicReceiverPicker::startFetch()
 {
+    m_fromCache = false;
     m_status->setText(tr("Loading public receivers…"));
     m_refresh->setEnabled(false);
     m_dir->fetch();
@@ -91,6 +109,12 @@ void KiwiPublicReceiverPicker::startFetch()
 
 void KiwiPublicReceiverPicker::onReady(const QVector<KiwiPublicReceiver>& receivers)
 {
+    // Populate (or overwrite) the session cache from every successful fetch.
+    // Serving from the cache passes the same vector straight back through here,
+    // which is a harmless no-op assignment.
+    g_sessionCache = receivers;
+    g_haveSessionCache = true;
+
     m_refresh->setEnabled(true);
     m_apiReceivers.clear();
     m_hiddenWebOnly = 0;
@@ -136,8 +160,11 @@ void KiwiPublicReceiverPicker::applyFilter()
         m_table->setItem(row, 3, new QTableWidgetItem(r.apiBadge()));
         ++shown;
     }
-    m_status->setText(tr("%1 receivers allow API access (%2 web-only hidden)")
-                          .arg(shown).arg(m_hiddenWebOnly));
+    QString status = tr("%1 receivers allow API access (%2 web-only hidden)")
+                         .arg(shown).arg(m_hiddenWebOnly);
+    if (m_fromCache)
+        status += tr("  ·  cached — use “Refresh list” to update");
+    m_status->setText(status);
     m_ok->setEnabled(!m_table->selectedItems().isEmpty());
 }
 
