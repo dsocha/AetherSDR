@@ -1,0 +1,155 @@
+#include "KiwiPublicReceiverPicker.h"
+
+#include <QDialogButtonBox>
+#include <QHBoxLayout>
+#include <QHeaderView>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QTableWidget>
+#include <QUrl>
+#include <QVBoxLayout>
+
+namespace AetherSDR {
+
+namespace {
+// "http://host:port" -> "host:port" (what KiwiSdrClient::normalizeEndpoint wants).
+QString endpointFromUrl(const QString& url)
+{
+    const QUrl u(url);
+    QString ep = u.host();
+    if (u.port() > 0)
+        ep += QStringLiteral(":") + QString::number(u.port());
+    return ep.isEmpty() ? url : ep;
+}
+} // namespace
+
+KiwiPublicReceiverPicker::KiwiPublicReceiverPicker(QWidget* parent)
+    : PersistentDialog(tr("Browse public KiwiSDR receivers"),
+                       QStringLiteral("KiwiPublicReceiverPickerGeometry"), parent)
+    , m_dir(new KiwiPublicDirectory(this))
+{
+    resize(680, 460);
+
+    auto* outer = new QVBoxLayout(bodyWidget());
+
+    auto* topRow = new QHBoxLayout;
+    m_search = new QLineEdit;
+    m_search->setPlaceholderText(tr("Filter by name, location, or host…"));
+    m_search->setClearButtonEnabled(true);
+    topRow->addWidget(m_search, 1);
+    m_refresh = new QPushButton(tr("Refresh"));
+    topRow->addWidget(m_refresh);
+    outer->addLayout(topRow);
+
+    m_table = new QTableWidget(0, 4, this);
+    m_table->setHorizontalHeaderLabels(
+        {tr("Receiver"), tr("Location"), tr("Users"), tr("API")});
+    m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_table->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_table->verticalHeader()->setVisible(false);
+    m_table->horizontalHeader()->setStretchLastSection(false);
+    m_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    outer->addWidget(m_table, 1);
+
+    m_status = new QLabel(tr("Loading public receivers…"));
+    m_status->setStyleSheet("QLabel { color: #8ea8c0; }");
+    outer->addWidget(m_status);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    m_ok = buttons->button(QDialogButtonBox::Ok);
+    m_ok->setText(tr("Add selected"));
+    m_ok->setEnabled(false);
+    outer->addWidget(buttons);
+
+    connect(buttons, &QDialogButtonBox::accepted, this, &KiwiPublicReceiverPicker::acceptCurrentRow);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    connect(m_table, &QTableWidget::itemDoubleClicked, this,
+            [this](QTableWidgetItem*) { acceptCurrentRow(); });
+    connect(m_table, &QTableWidget::itemSelectionChanged, this,
+            [this] { m_ok->setEnabled(!m_table->selectedItems().isEmpty()); });
+    connect(m_search, &QLineEdit::textChanged, this, &KiwiPublicReceiverPicker::applyFilter);
+    connect(m_refresh, &QPushButton::clicked, this, &KiwiPublicReceiverPicker::startFetch);
+
+    connect(m_dir, &KiwiPublicDirectory::ready, this, &KiwiPublicReceiverPicker::onReady);
+    connect(m_dir, &KiwiPublicDirectory::failed, this, [this](const QString& err) {
+        m_status->setText(tr("Could not load directory: %1").arg(err));
+        m_refresh->setEnabled(true);
+    });
+
+    startFetch();  // opening the picker IS the explicit user action -> one fetch
+}
+
+void KiwiPublicReceiverPicker::startFetch()
+{
+    m_status->setText(tr("Loading public receivers…"));
+    m_refresh->setEnabled(false);
+    m_dir->fetch();
+}
+
+void KiwiPublicReceiverPicker::onReady(const QVector<KiwiPublicReceiver>& receivers)
+{
+    m_refresh->setEnabled(true);
+    m_apiReceivers.clear();
+    m_hiddenWebOnly = 0;
+    for (const auto& r : receivers) {
+        if (r.offline) continue;
+        // Honor the operator: only receivers that allow the external API are
+        // listed. Web-only (ext_api == 0) receivers are excluded entirely.
+        if (!r.mayConnectViaApi()) {
+            if (r.apiPolicy() == KiwiPublicReceiver::ApiPolicy::Disabled)
+                ++m_hiddenWebOnly;
+            continue;
+        }
+        m_apiReceivers.push_back(r);
+    }
+    applyFilter();
+}
+
+void KiwiPublicReceiverPicker::applyFilter()
+{
+    const QString needle = m_search->text().trimmed();
+    m_table->setRowCount(0);
+    int shown = 0;
+    for (const auto& r : m_apiReceivers) {
+        if (!needle.isEmpty()
+            && !r.name.contains(needle, Qt::CaseInsensitive)
+            && !r.location.contains(needle, Qt::CaseInsensitive)
+            && !r.url.contains(needle, Qt::CaseInsensitive)) {
+            continue;
+        }
+        const int row = m_table->rowCount();
+        m_table->insertRow(row);
+
+        auto* nameItem = new QTableWidgetItem(r.name.isEmpty() ? r.url : r.name);
+        nameItem->setToolTip(r.url);
+        // Carry the endpoint + a suggested name on the row's first item.
+        nameItem->setData(Qt::UserRole, endpointFromUrl(r.url));
+        nameItem->setData(Qt::UserRole + 1,
+                          QUrl(r.url).host().left(16));  // short default name
+        m_table->setItem(row, 0, nameItem);
+        m_table->setItem(row, 1, new QTableWidgetItem(r.location));
+        m_table->setItem(row, 2, new QTableWidgetItem(
+            QStringLiteral("%1/%2").arg(r.users).arg(r.usersMax)));
+        m_table->setItem(row, 3, new QTableWidgetItem(r.apiBadge()));
+        ++shown;
+    }
+    m_status->setText(tr("%1 receivers allow API access (%2 web-only hidden)")
+                          .arg(shown).arg(m_hiddenWebOnly));
+    m_ok->setEnabled(!m_table->selectedItems().isEmpty());
+}
+
+void KiwiPublicReceiverPicker::acceptCurrentRow()
+{
+    const int row = m_table->currentRow();
+    if (row < 0) return;
+    QTableWidgetItem* item = m_table->item(row, 0);
+    if (!item) return;
+    m_selectedEndpoint = item->data(Qt::UserRole).toString();
+    m_selectedName = item->data(Qt::UserRole + 1).toString();
+    accept();
+}
+
+} // namespace AetherSDR

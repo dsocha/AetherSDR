@@ -7,6 +7,7 @@
 #include "models/XvtrPolicy.h"
 #include "core/AppSettings.h"
 #include "core/KiwiSdrManager.h"
+#include "KiwiPublicReceiverPicker.h"
 #include "core/LogManager.h"
 #include "core/PeripheralSettings.h"
 #include <QApplication>
@@ -3307,6 +3308,26 @@ QWidget* RadioSetupDialog::buildAntennaNamesTab()
             autoCheck->setStyleSheet(
                 "QCheckBox { color: #c8d8e8; font-size: 12px; spacing: 4px; }");
             rowLayout->addWidget(autoCheck, 1, 1, Qt::AlignCenter);
+
+            // Browse the public KiwiSDR directory to fill in a receiver. Only
+            // API-permitting receivers are listed (web-only operators honored).
+            auto* browseButton = new QPushButton("Browse public…");
+            browseButton->setAccessibleName("Browse public KiwiSDR receivers");
+            browseButton->setAccessibleDescription(
+                "Choose from the public KiwiSDR directory; receivers whose "
+                "operator disabled the external API are not shown.");
+            rowLayout->addWidget(browseButton, 0, 1);
+            connect(browseButton, &QPushButton::clicked, this,
+                    [this, nameEdit, endpointEdit] {
+                KiwiPublicReceiverPicker picker(this);
+                if (picker.exec() == QDialog::Accepted
+                    && !picker.selectedEndpoint().isEmpty()) {
+                    endpointEdit->setText(picker.selectedEndpoint());
+                    if (nameEdit->text().trimmed().isEmpty())
+                        nameEdit->setText(picker.selectedName());
+                    nameEdit->setFocus();  // let the user confirm/rename then commit
+                }
+            });
             kiwiRowsLayout->addWidget(rowFrame);
 
             auto committed = std::make_shared<bool>(false);
