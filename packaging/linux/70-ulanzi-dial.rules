@@ -1,4 +1,4 @@
-# AetherSDR — Ulanzi Dial access (#3670)
+# AetherSDR — Ulanzi Dial access (#3599)
 #
 # Grants the active local user access to Ulanzi Dial control-surface input
 # nodes so AetherSDR's evdev encoder mapper can read rotation/button events.

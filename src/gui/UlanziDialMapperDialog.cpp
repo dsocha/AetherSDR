@@ -594,7 +594,7 @@ void UlanziDialMapperDialog::onGrantAccessClicked()
     // as an argv element (not interpolated into the script) to avoid any
     // quoting/injection concern.
     static const QString kRule = QStringLiteral(
-        "# AetherSDR — Ulanzi Dial access (#3670)\n"
+        "# AetherSDR — Ulanzi Dial access (#3599)\n"
         "SUBSYSTEM==\"input\", KERNEL==\"event*\", "
         "ATTRS{name}==\"Ulanzi Dial*\", TAG+=\"uaccess\"\n");
     static const QString kScript = QStringLiteral(
@@ -604,6 +604,21 @@ void UlanziDialMapperDialog::onGrantAccessClicked()
         "udevadm trigger --subsystem-match=input");
 
     auto* proc = new QProcess(this);
+    // If pkexec can't even start, QProcess emits errorOccurred and never emits
+    // finished — recover the button instead of leaving it stuck on "Authorizing…".
+    connect(proc, &QProcess::errorOccurred, this,
+            [this, proc](QProcess::ProcessError) {
+        if (proc->state() != QProcess::NotRunning) return;  // started; finished will handle it
+        proc->deleteLater();
+        if (m_grantAccessBtn) {
+            m_grantAccessBtn->setEnabled(true);
+            m_grantAccessBtn->setText(tr("Grant access"));
+        }
+        if (m_statusLabel) {
+            m_statusLabel->setText(tr("Access install failed"));
+            m_statusLabel->setStyleSheet("QLabel { color: #cc3333; }");
+        }
+    });
     connect(proc, &QProcess::finished, this,
             [this, proc](int code, QProcess::ExitStatus) {
         const QByteArray err = proc->readAllStandardError();
