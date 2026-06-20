@@ -567,6 +567,7 @@ set(CORE_SOURCES
     src/core/KiwiSdrProtocol.cpp
     src/core/KiwiSdrClient.cpp
     src/core/KiwiSdrManager.cpp
+    src/core/KiwiPublicDirectory.cpp
     src/core/WanConnection.cpp
     src/core/DxClusterClient.cpp
     src/core/WsjtxClient.cpp
@@ -1899,6 +1900,26 @@ add_executable(kiwi_sdr_protocol_test
 target_include_directories(kiwi_sdr_protocol_test PRIVATE src)
 target_link_libraries(kiwi_sdr_protocol_test PRIVATE Qt6::Core)
 add_test(NAME kiwi_sdr_protocol_test COMMAND kiwi_sdr_protocol_test)
+
+# Public-directory parser + external-API (ext_api) policy honoring.
+add_executable(kiwi_public_directory_test
+    tests/kiwi_public_directory_test.cpp
+    src/core/KiwiPublicDirectory.cpp
+)
+target_include_directories(kiwi_public_directory_test PRIVATE src)
+target_link_libraries(kiwi_public_directory_test PRIVATE Qt6::Core Qt6::Network)
+set_target_properties(kiwi_public_directory_test PROPERTIES AUTOMOC ON)
+add_test(NAME kiwi_public_directory_test COMMAND kiwi_public_directory_test)
+
+# Demonstration tool: honest, API-policy-aware read of kiwisdr.com/public
+# (proof-of-concept shown to operators — see docs/kiwisdr-public-directory.md).
+add_executable(kiwi_directory_poc
+    tools/kiwi_directory_poc.cpp
+    src/core/KiwiPublicDirectory.cpp
+)
+target_include_directories(kiwi_directory_poc PRIVATE src)
+target_link_libraries(kiwi_directory_poc PRIVATE Qt6::Core Qt6::Network)
+set_target_properties(kiwi_directory_poc PROPERTIES AUTOMOC ON)
 
 add_executable(client_gate_test
     tests/client_gate_test.cpp
