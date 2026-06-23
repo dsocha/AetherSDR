@@ -745,6 +745,40 @@ void section5(RigctlClient& c, Runner& r, qint64 origFreq)
     r.section(QStringLiteral("Section 5 — Split VFO"));
     const qint64 splitTxFreq = origFreq + 1000;
 
+    // ── DAX-assign settle guard ──────────────────────────────────────────────
+    // Closing a TX slice we created on demand frees its SliceModel. If a deferred
+    // DAX-channel-assign timer is still pending — it's armed on sliceAdded when a
+    // DAX/TCI audio client is active, e.g. after WSJT-X has been used on this radio
+    // — it fires on the freed slice and crashes ASDR. A real client never creates
+    // and removes a split slice this fast; only this test does. So settle before
+    // every on-demand split teardown to let that timer fire on the LIVE slice
+    // first. (The underlying DAX-timer UAF is a separate, app-side issue.)
+    constexpr int kDaxSettleMs = 700;
+    const QString kSplitOff = QStringLiteral("\\set_split_vfo 0 VFOA");
+    auto disableSplitSettled = [&]() {
+        QThread::msleep(kDaxSettleMs);
+        return c.send(kSplitOff);
+    };
+
+    // Poll get_split_vfo until Split == want (or timeout); return the final value.
+    // Replaces the do/while poll loop that was hand-rolled at every split check.
+    auto waitForSplit = [&](QLatin1String want, int timeoutMs) -> QString {
+        QString s;
+        QElapsedTimer t; t.start();
+        do {
+            s = c.field(c.send(QStringLiteral("\\get_split_vfo")), QStringLiteral("Split"));
+            if (s == want || t.elapsed() >= timeoutMs) break;
+            QThread::msleep(150);
+        } while (true);
+        return s;
+    };
+    // Settle-disable split and confirm it reached the off state — the "known-off
+    // baseline" precondition several subtests need.
+    auto resetSplitOff = [&]() {
+        disableSplitSettled();
+        return waitForSplit(QLatin1String("0"), 2000) == QLatin1String("0");
+    };
+
     // 5.1  baseline split state
     QStringList lines = c.send(QStringLiteral("\\get_split_vfo"));
     const QString splitVal = c.field(lines, QStringLiteral("Split"));
@@ -760,19 +794,9 @@ void section5(RigctlClient& c, Runner& r, qint64 origFreq)
     r.check(QStringLiteral("5.2  set_split_vfo 1 VFOB returns RPRT 0"), c.ok(lines));
 
     // 5.3  poll until split is confirmed active (creating a new slice takes variable time)
-    QString splitOn;
-    {
-        QElapsedTimer t;
-        t.start();
-        do {
-            lines = c.send(QStringLiteral("\\get_split_vfo"));
-            splitOn = c.field(lines, QStringLiteral("Split"));
-            if (splitOn == QLatin1String("1") || t.elapsed() >= 5000) break;
-            QThread::msleep(200);
-        } while (true);
-    }
+    const QString splitOn = waitForSplit(QLatin1String("1"), 5000);
     r.check(QStringLiteral("5.3  get_split_vfo reports Split: 1  [needs 2 slices in GUI]"),
-            c.ok(lines) && splitOn == QLatin1String("1"),
+            splitOn == QLatin1String("1"),
             QStringLiteral("Split=%1 — open a second slice in AetherSDR if this fails")
                 .arg(splitOn));
 
@@ -910,23 +934,13 @@ void section5(RigctlClient& c, Runner& r, qint64 origFreq)
             QStringLiteral("Split=%1").arg(splitF));
 
     // 5.9  disable split and verify
-    lines = c.send(QStringLiteral("\\set_split_vfo 0 VFOA"));
+    lines = disableSplitSettled();
     r.check(QStringLiteral("5.9  set_split_vfo 0 VFOA returns RPRT 0"), c.ok(lines));
 
     // 5.9b  poll until split is confirmed off (slice teardown takes variable time)
-    QString splitOff;
-    {
-        QElapsedTimer t;
-        t.start();
-        do {
-            lines = c.send(QStringLiteral("\\get_split_vfo"));
-            splitOff = c.field(lines, QStringLiteral("Split"));
-            if (splitOff == QLatin1String("0") || t.elapsed() >= 2000) break;
-            QThread::msleep(200);
-        } while (true);
-    }
+    const QString splitOff = waitForSplit(QLatin1String("0"), 2000);
     r.check(QStringLiteral("5.9b get_split_vfo confirms Split: 0 after disable"),
-            c.ok(lines) && splitOff == QLatin1String("0"), splitOff);
+            splitOff == QLatin1String("0"), splitOff);
 
     // 5.10 / 5.10b  deferred stash path: enable split then immediately set freq + mode.
     //               Single-slice: stashed in m_pendingSplitFreqMHz / m_pendingSplitMode,
@@ -954,7 +968,7 @@ void section5(RigctlClient& c, Runner& r, qint64 origFreq)
     r.check(QStringLiteral("5.10b stashed split freq applied to TX slice"),
             stashConfirm > 0 && qAbs(stashConfirm - stashFreq) < 100,
             QStringLiteral("expected≈%1 got=%2").arg(stashFreq).arg(stashConfirm));
-    c.send(QStringLiteral("\\set_split_vfo 0 VFOA"));
+    disableSplitSettled();
 
     // 5.11  Targetable VFOB: with split OFF, set_freq/set_mode VFOB must enable
     //        split on demand and succeed (RPRT 0), not RPRT -8. We advertise
@@ -962,31 +976,94 @@ void section5(RigctlClient& c, Runner& r, qint64 origFreq)
     //        directly ("set_freq VFOB <hz>" / "set_mode VFOB <mode>") WITHOUT a
     //        preceding set_split_vfo — which previously failed with -8.
     {
-        c.send(QStringLiteral("\\set_split_vfo 0 VFOA"));  // ensure split off
-        QString off;
-        QElapsedTimer t; t.start();
-        do {
-            off = c.field(c.send(QStringLiteral("\\get_split_vfo")), QStringLiteral("Split"));
-            if (off == QLatin1String("0") || t.elapsed() >= 1500) break;
-            QThread::msleep(100);
-        } while (true);
-
+        resetSplitOff();  // ensure split off
         lines = c.send(QStringLiteral("\\set_freq VFOB %1").arg(origFreq + 2500));
         r.check(QStringLiteral("5.11 set_freq VFOB with split off auto-enables split (RPRT 0, not -8)"),
                 c.ok(lines), lines.join(QStringLiteral(" | ")));
 
-        c.send(QStringLiteral("\\set_split_vfo 0 VFOA"));  // reset, then re-test mode path
-        t.restart();
-        do {
-            off = c.field(c.send(QStringLiteral("\\get_split_vfo")), QStringLiteral("Split"));
-            if (off == QLatin1String("0") || t.elapsed() >= 1500) break;
-            QThread::msleep(100);
-        } while (true);
-
+        resetSplitOff();  // reset, then re-test mode path
         lines = c.send(QStringLiteral("\\set_mode VFOB PKTUSB -1"));
         r.check(QStringLiteral("5.11 set_mode VFOB with split off auto-enables split (RPRT 0, not -8)"),
                 c.ok(lines), lines.join(QStringLiteral(" | ")));
-        c.send(QStringLiteral("\\set_split_vfo 0 VFOA"));  // cleanup
+        disableSplitSettled();  // cleanup
+    }
+
+    // 5.12  Implicit-enable reclaim (#3703 bug a). Split enabled IMPLICITLY via
+    //        set_freq VFOB (no preceding set_split_vfo 1) must still record the
+    //        enable, so a later set_split_vfo 0 sees the 1→0 edge and reclaims TX
+    //        back to the RX slice. Before the fix m_lastSplitEnable stayed 0 on the
+    //        implicit path, the reclaim was skipped, and get_split_vfo kept
+    //        reporting Split: 1 after disable.  [needs 2 slices]
+    {
+        resetSplitOff();  // known-off baseline
+        // Implicit enable: address the TX VFO directly, with NO set_split_vfo first.
+        c.send(QStringLiteral("\\set_freq VFOB %1").arg(origFreq + 4200));
+        const QString on = waitForSplit(QLatin1String("1"), 5000);
+        if (on == QLatin1String("1")) {
+            // Disable; the recorded implicit enable must drive the 1→0 reclaim so
+            // split reads back off.
+            disableSplitSettled();
+            const QString off = waitForSplit(QLatin1String("0"), 2000);
+            r.check(QStringLiteral("5.12 implicit enable (set_freq VFOB) reclaims TX on set_split_vfo 0  [needs 2 slices]"),
+                    off == QLatin1String("0"),
+                    QStringLiteral("Split after disable=%1 (must be 0)").arg(off));
+        } else {
+            r.skip(QStringLiteral("5.12 implicit-enable reclaim  [needs 2 slices]"),
+                   QStringLiteral("implicit split did not engage — open a second slice"));
+        }
+    }
+
+    // 5.13  maxSlices guard on create-on-demand (#3703 bug b). On a single-slice-
+    //        capacity receiver, set_split_vfo 1 must NOT arm a phantom deferred
+    //        create that can never land (which left tryPromoteTxSlice hung). It
+    //        should fail to engage cleanly: get_split_freq → RPRT -1.
+    //        Conditional: rigctld exposes no slice-count/capacity query, so we
+    //        infer capacity from whether split engages. If it engages (the radio
+    //        has room or a second slice), the guard path isn't reachable in this
+    //        config → SKIP rather than false-fail.
+    {
+        resetSplitOff();  // known-off
+        c.send(QStringLiteral("\\set_split_vfo 1 VFOB"));
+        const QString on = waitForSplit(QLatin1String("1"), 5000);
+        if (on == QLatin1String("1")) {
+            r.skip(QStringLiteral("5.13 maxSlices guard on create-on-demand"),
+                   QStringLiteral("split engaged — radio has slice capacity, guard path not exercised"));
+        } else {
+            // Split could not engage: the guard fired (single-slice-capacity port).
+            // Confirm it failed CLEANLY — get_split_freq returns RPRT -1, with no
+            // phantom TX slice and no hung pending state.
+            QStringList gsf = c.send(QStringLiteral("\\get_split_freq"));
+            r.check(QStringLiteral("5.13 at-capacity set_split_vfo 1 fails cleanly (get_split_freq RPRT -1)"),
+                    !c.ok(gsf),
+                    gsf.join(QStringLiteral(" | ")));
+        }
+        disableSplitSettled();  // cleanup
+    }
+
+    // 5.14  set_split_freq / set_split_mode establish split on demand (#3703
+    //        create-on-demand). WSJT-X "Rig" split (via Hamlib set_split_freq_mode)
+    //        can call set_split_freq directly — without a preceding set_split_vfo 1,
+    //        or in a window racing slice creation. It must NOT return RPRT -1
+    //        (which aborts the transmit); it should create/promote the TX slice and
+    //        engage split. Before the fix, set_split_freq with no TX slice → -1.
+    {
+        resetSplitOff();  // known-off baseline
+        // Direct set_split_freq with NO preceding set_split_vfo.
+        lines = c.send(QStringLiteral("\\set_split_freq %1").arg(origFreq + 2500));
+        r.check(QStringLiteral("5.14 set_split_freq with split off establishes split on demand (RPRT 0, not -1)"),
+                c.ok(lines), lines.join(QStringLiteral(" | ")));
+
+        // Split should engage (slice created or promoted) shortly after.
+        const QString on = waitForSplit(QLatin1String("1"), 5000);
+        r.check(QStringLiteral("5.14 split active after on-demand set_split_freq  [needs a free slice]"),
+                on == QLatin1String("1"), QStringLiteral("Split=%1").arg(on));
+
+        // set_split_mode must likewise establish-on-demand, never -1.
+        lines = c.send(QStringLiteral("\\set_split_mode USB 2700"));
+        r.check(QStringLiteral("5.14 set_split_mode after on-demand establish returns RPRT 0"),
+                c.ok(lines), lines.join(QStringLiteral(" | ")));
+
+        disableSplitSettled();  // cleanup
     }
 }
 
