@@ -2,6 +2,7 @@
 #include "AppSettings.h"
 #include "AudioEngine.h"
 #include "LogManager.h"
+#include "NetworkSettings.h"
 #include "OpusCodec.h"
 #include "PerfTelemetry.h"
 #include "RadioConnection.h"
@@ -111,6 +112,10 @@ void PanadapterStream::init()
         AppSettings::instance().value("AudioPacketLossConcealment", "True")
             .toString() == "True");
 
+    // Seed the receive-buffer request from the persisted operator setting; each
+    // bind path then applies it via applyReceiveBufferSize(). (#3810)
+    m_desiredRcvBufBytes = NetworkSettings::vitaReceiveBufferBytes();
+
     connect(m_socket, &QUdpSocket::readyRead,
             this, &PanadapterStream::onDatagramReady);
 
@@ -156,6 +161,45 @@ bool PanadapterStream::isRunning() const
     return m_socket && m_socket->state() == QAbstractSocket::BoundState;
 }
 
+void PanadapterStream::applyReceiveBufferSize()
+{
+    if (!m_socket)
+        return;
+    // The VITA-49 streams (panadapter FFT + waterfall tiles + audio + meters)
+    // burst well above the OS default receive buffer (~208 KB on Linux). A burst
+    // — or a brief worker-thread drain stall while the host is loaded — then
+    // overflows the kernel buffer, and the kernel silently drops the excess
+    // datagrams. Those drops surface as VITA-49 sequence gaps, which the network
+    // monitor reads as packet loss and the adaptive throttle reacts to by capping
+    // the radio's pan FPS — a visible "network stats dropped" event. Request a
+    // generous SO_RCVBUF so normal bursts are absorbed. The kernel caps the grant
+    // at net.core.rmem_max; we log the granted size so an undersized rmem_max is
+    // visible in the logs rather than silently limiting us. The requested size
+    // is operator-adjustable (Radio Setup → Advanced); default 4 MiB. (#3810)
+    const int requested = m_desiredRcvBufBytes;
+    m_socket->setSocketOption(QAbstractSocket::ReceiveBufferSizeSocketOption, requested);
+    const int granted =
+        m_socket->socketOption(QAbstractSocket::ReceiveBufferSizeSocketOption).toInt();
+    m_grantedRcvBufBytes.store(granted);
+    qCInfo(lcVita49).noquote()
+        << "PanadapterStream: VITA UDP receive buffer"
+        << QStringLiteral("requested=%1").arg(requested)
+        << QStringLiteral("granted=%1").arg(granted)
+        << (granted < requested
+                ? QStringLiteral("(capped by net.core.rmem_max — raise it for more headroom)")
+                : QString());
+    emit receiveBufferApplied(requested, granted);
+}
+
+void PanadapterStream::setReceiveBufferSizeBytes(int bytes)
+{
+    m_desiredRcvBufBytes = bytes;
+    // Re-apply live if we already have a bound socket; otherwise the next bind
+    // picks it up via applyReceiveBufferSize().
+    if (m_socket && m_socket->state() == QAbstractSocket::BoundState)
+        applyReceiveBufferSize();
+}
+
 bool PanadapterStream::start(RadioConnection* conn)
 {
     if (isRunning()) stop();  // clean up previous session before rebinding (#561)
@@ -188,6 +232,7 @@ bool PanadapterStream::start(RadioConnection* conn)
         return false;
     }
 
+    applyReceiveBufferSize();   // #3810 — absorb VITA-49 bursts so they don't drop
     m_localAddress = m_socket->localAddress();
     m_localPort = m_socket->localPort();
     qCDebug(lcVita49) << "PanadapterStream: local UDP endpoint"
@@ -256,6 +301,7 @@ bool PanadapterStream::rebindToEphemeralPort(RadioConnection* conn)
         return false;
     }
 
+    applyReceiveBufferSize();   // #3810 — absorb VITA-49 bursts so they don't drop
     m_localAddress = m_socket->localAddress();
     m_localPort = m_socket->localPort();
     m_radioAddress = conn ? conn->radioAddress() : QHostAddress();
@@ -304,6 +350,7 @@ bool PanadapterStream::startWan(const QHostAddress& radioAddr, quint16 radioUdpP
         return false;
     }
 
+    applyReceiveBufferSize();   // #3810 — absorb VITA-49 bursts so they don't drop
     m_localPort = m_socket->localPort();
     m_localAddress = m_socket->localAddress();
     m_radioAddress = radioAddr;
