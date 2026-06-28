@@ -1737,6 +1737,10 @@ void MainWindow::registerMidiParams()
         [this](float v) { if (auto* s = activeSlice()) s->setNb(v > 0.5f); },
         [this]() -> float { auto* s = activeSlice(); return s && s->nbOn() ? 1 : 0; });
 
+    reg("rx.adaptiveFilter", "Adaptive RX Filter", "RX", P::Toggle, 0, 1,
+        [this](float v) { if (auto* s = activeSlice()) s->setAdaptiveFilterEnabled(v > 0.5f); },
+        [this]() -> float { auto* s = activeSlice(); return s && s->adaptiveFilterEnabled() ? 1 : 0; });
+
     reg("rx.nrEnable", "Noise Reduction", "RX", P::Toggle, 0, 1,
         [this](float v) { if (auto* s = activeSlice()) s->setNr(v > 0.5f); },
         [this]() -> float { auto* s = activeSlice(); return s && s->nrOn() ? 1 : 0; });

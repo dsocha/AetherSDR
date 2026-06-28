@@ -504,6 +504,16 @@ private:
     class QPushButton* m_edgesBtn{nullptr};
     void loadDisplayPrefs();
     void saveDisplayPrefs();
+    // Adaptive RX filter controls (SSB-only, rebuilt with the Mode tab) — RFC #3878
+    class QWidget*   m_adaptiveContainer{nullptr};
+    class QCheckBox* m_adaptiveChk{nullptr};
+    class QComboBox* m_adaptiveMinLowCmb{nullptr};
+    class QComboBox* m_adaptiveMaxHighCmb{nullptr};
+    class QWidget*   m_adaptiveLoRow{nullptr};   // bound-combo rows: greyed when
+    class QWidget*   m_adaptiveHiRow{nullptr};   // the Adaptive checkbox is off
+    void loadAdaptivePrefs();   // single nested key AppSettings["AdaptiveFilter"]
+    void saveAdaptivePrefs();
+    void updateAdaptiveBoundsVisible();  // hide the bound rows when adaptive off
 
     QSlider* m_sqlSlider{nullptr};
     QComboBox* m_agcCmb{nullptr};

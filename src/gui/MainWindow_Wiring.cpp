@@ -40,6 +40,7 @@
 #include "core/KiwiSdrProtocol.h"
 #include "SpectrumOverlayMenu.h"
 #include "SpectrumWidget.h"
+#include "core/AdaptiveFilterEngine.h"
 #include "VfoWidget.h"
 #include "core/BandStackSettings.h"
 #include "core/AppSettings.h"
@@ -3331,6 +3332,24 @@ void MainWindow::wireVfoWidget(VfoWidget* w, SliceModel* s)
             sw->setSliceOverlayMarkerStyle(sliceId, markerWidth, hideEdges);
     });
 
+    // Adaptive RX filter (RFC #3878): show/hide this slice's floor-level edge
+    // markers on its panadapter overlay as the feature is toggled.
+    connect(s, &SliceModel::adaptiveFilterEnabledChanged, this,
+            [this, sliceId](bool on) {
+        auto* sl = m_radioModel.slice(sliceId);
+        if (!sl) return;
+        if (auto* sw = spectrumForSlice(sl))
+            sw->setSliceOverlayAdaptive(sliceId, on);
+    });
+    // ...and the green/red status ball follows the live-fit (active) state.
+    connect(s, &SliceModel::adaptiveActiveChanged, this,
+            [this, sliceId](bool active) {
+        auto* sl = m_radioModel.slice(sliceId);
+        if (!sl) return;
+        if (auto* sw = spectrumForSlice(sl))
+            sw->setSliceOverlayAdaptiveActive(sliceId, active);
+    });
+
     // Pan re-apply after NR mono-mix (#1460, #1796): keep AudioEngine in sync
     // with the active Flex-backed slice's radio-side pan value. Kiwi-backed
     // slices update their own external source pan via
@@ -3721,6 +3740,35 @@ void MainWindow::wireMeters()
             m_radioModel.transmitModel().apdConfigurable());
     });
 
+}
+
+// Adaptive RX filter (RFC #3878): per FFT frame, drive the fit engine for every
+// SSB slice on the pan that produced the frame. The engine itself gates on
+// mode/enabled and only does real work for enabled SSB slices, so this is a
+// cheap pan/slice lookup otherwise. The pan span + noise floor come from the
+// same source the S-History detector uses (SpectrumWidget::noiseFloorDbm()).
+void MainWindow::onSpectrumReadyForAdaptiveFilter(quint32 streamId,
+                                                  const QVector<float>& bins,
+                                                  qint64 emittedNs)
+{
+    Q_UNUSED(emittedNs);
+    if (m_shuttingDown || !m_panStack) return;
+    if (!m_adaptiveFilterEngine)
+        m_adaptiveFilterEngine = new AdaptiveFilterEngine(this);
+
+    for (auto* pan : m_radioModel.panadapters()) {
+        if (!pan || pan->panStreamId() != streamId) continue;
+
+        SpectrumWidget* sw = m_panStack->spectrum(pan->panId());
+        const float noiseFloor = sw ? sw->noiseFloorDbm() : -1000.0f;
+
+        for (auto* slice : m_radioModel.slices()) {
+            if (!slice || slice->panId() != pan->panId()) continue;
+            m_adaptiveFilterEngine->processFrame(
+                slice, pan->centerMhz(), pan->bandwidthMhz(), bins, noiseFloor);
+        }
+        break;  // one pan owns this stream id
+    }
 }
 
 } // namespace AetherSDR

@@ -403,6 +403,8 @@ public:
         // 1 = 1 px, 3 = 3 px.
         int    markerWidth{1};
         bool   filterEdgesHidden{false};  // skip drawing filter-edge vertical lines
+        bool   adaptiveEnabled{false};    // draw adaptive-filter edge markers (RFC #3878)
+        bool   adaptiveActive{false};     // a confident auto fit is currently applied
         QString perClientLetter;   // radio-provided index_letter (Multi-Flex)
     };
 
@@ -422,6 +424,10 @@ public:
     void setSliceOverlayLetter(int sliceId, const QString& letter);
     // Update per-slice marker display style (#1526)
     void setSliceOverlayMarkerStyle(int sliceId, int markerWidth, bool filterEdgesHidden);
+    // Toggle the adaptive-filter floor-level edge markers for a slice (RFC #3878)
+    void setSliceOverlayAdaptive(int sliceId, bool enabled);
+    // Status of the adaptive fit (green/red ball after the high-cut label)
+    void setSliceOverlayAdaptiveActive(int sliceId, bool active);
     // Remove a slice overlay.
     void removeSliceOverlay(int sliceId);
 

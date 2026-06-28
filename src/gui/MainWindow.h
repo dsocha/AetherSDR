@@ -94,6 +94,7 @@ class KiwiSdrManager;
 class SpectrumWidget;
 class PanadapterApplet;
 class PanadapterStack;
+class AdaptiveFilterEngine;
 class AppletPanel;
 class BandPlanManager;
 class NetworkDiagnosticsHistory;
@@ -680,6 +681,9 @@ private:
     void rebuildSHistoryForPan(const QString& panId);
     void expireSHistoryMarkers();
     void onSpectrumReadyForSHistory(quint32 streamId, const QVector<float>& bins, qint64 emittedNs);
+    // Adaptive RX filter — drive the fit engine off the same FFT frames (RFC #3878).
+    void onSpectrumReadyForAdaptiveFilter(quint32 streamId, const QVector<float>& bins, qint64 emittedNs);
+    AdaptiveFilterEngine* m_adaptiveFilterEngine{nullptr};  // parented to this
     // Per-pan spectrogram ring buffer for CNN classification.
     // shared_ptr so QHash COW can copy the pointer on detach without deep-copying
     // the 32-frame ring buffer (unique_ptr is non-copyable, which breaks QHash::operator[]).

@@ -939,6 +939,10 @@ void MainWindow::wirePanLifecycle()
     connect(m_radioModel.panStream(), &PanadapterStream::spectrumReady,
             this, &MainWindow::onSpectrumReadyForSHistory);
 
+    // ── Adaptive RX filter — drive the fit engine off the same FFT frames (RFC #3878)
+    connect(m_radioModel.panStream(), &PanadapterStream::spectrumReady,
+            this, &MainWindow::onSpectrumReadyForAdaptiveFilter);
+
     connect(m_radioModel.panStream(), &PanadapterStream::waterfallRowReady,
             this, [this, profileLoadFrameReady](quint32 streamId,
                                                 const QVector<float>& bins,

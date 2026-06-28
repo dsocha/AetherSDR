@@ -4502,6 +4502,26 @@ void SpectrumWidget::setSliceOverlayMarkerStyle(int sliceId, int markerWidth, bo
     markOverlayDirty();
 }
 
+void SpectrumWidget::setSliceOverlayAdaptive(int sliceId, bool enabled)
+{
+    int idx = overlayIndex(sliceId);
+    if (idx < 0) return;
+    auto& o = m_sliceOverlays[idx];
+    if (o.adaptiveEnabled == enabled) return;
+    o.adaptiveEnabled = enabled;
+    markOverlayDirty();
+}
+
+void SpectrumWidget::setSliceOverlayAdaptiveActive(int sliceId, bool active)
+{
+    int idx = overlayIndex(sliceId);
+    if (idx < 0) return;
+    auto& o = m_sliceOverlays[idx];
+    if (o.adaptiveActive == active) return;
+    o.adaptiveActive = active;
+    markOverlayDirty();
+}
+
 void SpectrumWidget::setSliceOverlayFreq(int sliceId, double freqMhz)
 {
     for (auto& so : m_sliceOverlays) {
@@ -10236,6 +10256,83 @@ void SpectrumWidget::drawSliceMarkers(QPainter& p, const QRect& specRect, const 
             p.setFont(f);
             p.setPen(AetherSDR::theme::withAlpha("color.accent.danger", 220));
             p.drawText(xitX + 2, specRect.top() + 12, "X");
+        }
+
+        // ── Adaptive RX filter edge markers (RFC #3878) ──────────────────
+        // Floor-level triangles whose apex sticks to each filter edge and
+        // points inward, with the audio cut value labelled just outside the
+        // body. Shown whenever the feature is enabled (even at the baseline
+        // width); hidden only when the passband is too narrow to read two
+        // markers. White (#ffffff) to match the SmartMTR extreme triangles.
+        const bool adaptiveSsb = so.adaptiveEnabled &&
+            (so.mode == QStringLiteral("USB") || so.mode == QStringLiteral("LSB"));
+        if (adaptiveSsb && fW >= 14) {
+            float floorDbm = m_measuredNoiseFloorDbm;
+            float norm;
+            if (floorDbm > -500.0f && m_dynamicRange > 0.0f) {
+                norm = (m_refLevel - floorDbm) / m_dynamicRange;
+            } else {
+                norm = 0.85f;  // floor not measured yet — sit low in the pane
+            }
+            const int floorY = specRect.top()
+                + static_cast<int>(std::clamp(norm, 0.0f, 1.0f) * specRect.height());
+
+            const int triLen  = 7;   // apex (on edge) -> base (outside)
+            const int triHalf = 5;   // half base height
+            const QColor mk(255, 255, 255);
+
+            p.setPen(Qt::NoPen);
+            p.setBrush(mk);
+            QPolygon triL;  // left (low-freq) edge: apex on fX1, body to the left
+            triL << QPoint(fX1, floorY)
+                 << QPoint(fX1 - triLen, floorY - triHalf)
+                 << QPoint(fX1 - triLen, floorY + triHalf);
+            p.drawPolygon(triL);
+            QPolygon triR;  // right (high-freq) edge: apex on fX2, body to the right
+            triR << QPoint(fX2, floorY)
+                 << QPoint(fX2 + triLen, floorY - triHalf)
+                 << QPoint(fX2 + triLen, floorY + triHalf);
+            p.drawPolygon(triR);
+
+            // Labels: audio cut magnitudes, just beyond each triangle base.
+            QFont lf = p.font();
+            lf.setPixelSize(11);              // match SmartMTR extreme labels
+            lf.setWeight(QFont::Light);       // (~11 px, Light weight)
+            p.setFont(lf);
+            const QFontMetrics fm(lf);
+            const QString lblL = QString::number(qAbs(so.filterLowHz));
+            const QString lblR = QString::number(qAbs(so.filterHighHz));
+            const int ty  = floorY + fm.ascent() / 2 - 1;
+            const int gap = 3;
+            const int lxR = fX2 + triLen + gap;                                  // left-aligned
+            const int lxL = fX1 - triLen - gap - fm.horizontalAdvance(lblL);     // right-aligned
+            const auto haloText = [&](int x, const QString& s) {
+                p.setPen(QColor(0, 0, 0, 200));
+                p.drawText(x - 1, ty, s); p.drawText(x + 1, ty, s);
+                p.drawText(x, ty - 1, s); p.drawText(x, ty + 1, s);
+                p.setPen(mk);
+                p.drawText(x, ty, s);
+            };
+            haloText(lxL, lblL);
+            haloText(lxR, lblR);
+
+            // Status ball just outside the HIGH-CUT label (RFC #3878):
+            // green = AUTO fit applied, red = enabled but not applied (e.g.
+            // signal too weak). The high-cut is the edge farthest from the
+            // carrier — the larger |offset| — which is the right edge for USB
+            // and the left edge for LSB.
+            const bool hiOnRight = qAbs(so.filterHighHz) >= qAbs(so.filterLowHz);
+            const int  ballR = 4;
+            const int  bgap  = 5;
+            const int  ballCx = hiOnRight
+                ? lxR + fm.horizontalAdvance(lblR) + bgap + ballR   // outward (right)
+                : lxL - bgap - ballR;                               // outward (left)
+            const QColor ballCol = so.adaptiveActive
+                ? AetherSDR::theme::withAlpha("color.accent.success", 255)
+                : AetherSDR::theme::withAlpha("color.accent.danger", 255);
+            p.setPen(QPen(QColor(0, 0, 0, 160), 1));   // dark outline for contrast
+            p.setBrush(ballCol);
+            p.drawEllipse(QPoint(ballCx, floorY), ballR, ballR);
         }
 
         // Slice letter badge and TX badge are now rendered by each

@@ -40,6 +40,15 @@ public:
     QStringList modeList() const { return m_modeList; }
     int     filterLow()  const { return m_filterLow; }   // Hz offset
     int     filterHigh() const { return m_filterHigh; }
+    // Monotonic counter bumped ONLY by setFilterWidth() (operator preset/drag),
+    // never by applyAdaptiveFilter() or status echoes. Lets the adaptive engine
+    // recognise a genuine manual filter edit without value-guessing. RFC #3878.
+    quint64 userFilterEpoch() const { return m_userFilterEpoch; }
+    // Getters — Adaptive RX filter (client-side ESSB auto-fit; RFC #3878)
+    bool    adaptiveFilterEnabled() const { return m_adaptiveFilterEnabled; }
+    int     adaptiveMinLowCut()     const { return m_adaptiveMinLowCut; }  // Hz
+    int     adaptiveMaxHighCut()    const { return m_adaptiveMaxHighCut; } // Hz
+    bool    adaptiveActive()        const { return m_adaptiveActive; }
     bool    isActive()   const { return m_active; }
     bool    isTxSlice()  const { return m_txSlice; }
     float   rfGain()     const { return m_rfGain; }
@@ -141,6 +150,16 @@ public:
     void tuneAndRecenter(double mhz);      // slice tune — recenters pan (band changes)
     void setMode(const QString& mode);
     void setFilterWidth(int low, int high);
+    // Adaptive RX filter (client-side; the toggle/bounds send no radio
+    // command — the engine drives the passband via applyAdaptiveFilter()).
+    void setAdaptiveFilterEnabled(bool on);
+    void setAdaptiveMinLowCut(int hz);
+    void setAdaptiveMaxHighCut(int hz);
+    void setAdaptiveActive(bool on);
+    // Engine-driven passband write: same wire command as setFilterWidth, but
+    // a distinct entry point so the engine can recognise its own writes (vs
+    // a user preset/drag) when tracking the manual baseline. RFC #3878.
+    void applyAdaptiveFilter(int low, int high);
     void setAudioGain(float gain);
     void setRfGain(float gain);
     void setAudioPan(int pan);
@@ -239,6 +258,10 @@ signals:
     void panIdChanged(const QString& panId);
     void modeChanged(const QString& mode);
     void filterChanged(int low, int high);
+    void adaptiveFilterEnabledChanged(bool on);
+    void adaptiveMinLowCutChanged(int hz);
+    void adaptiveMaxHighCutChanged(int hz);
+    void adaptiveActiveChanged(bool on);
     void activeChanged(bool active);
     void txSliceChanged(bool tx);
     void audioGainChanged(float gain);
@@ -316,6 +339,14 @@ private:
     QStringList m_modeList;
     int     m_filterLow{-1500};
     int     m_filterHigh{1500};
+    quint64 m_userFilterEpoch{0};   // bumped only by setFilterWidth() (RFC #3878)
+    // Adaptive RX filter — client-side config + runtime state (RFC #3878).
+    // The filter edges themselves stay radio-authoritative (never persisted);
+    // only enabled + the two bounds are persisted by the GUI.
+    bool    m_adaptiveFilterEnabled{false};
+    int     m_adaptiveMinLowCut{0};      // Hz, one of {0,50,100,200}
+    int     m_adaptiveMaxHighCut{4000};  // Hz, one of {3000,3500,4000,6000}
+    bool    m_adaptiveActive{false};     // a confident live fit is applied
     bool    m_active{false};
     bool    m_txSlice{false};
     float   m_rfGain{0.0f};

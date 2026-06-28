@@ -84,7 +84,59 @@ void SliceModel::setFilterWidth(int low, int high)
 {
     m_filterLow  = low;
     m_filterHigh = high;
+    // Operator-driven filter change (preset/drag): bump the user epoch so the
+    // adaptive engine adopts this as its new baseline. applyAdaptiveFilter()
+    // deliberately does NOT bump it. RFC #3878.
+    ++m_userFilterEpoch;
     // FlexAPI: "filt <id> <low_hz> <high_hz>"
+    sendCommand(QString("filt %1 %2 %3").arg(m_id).arg(low).arg(high));
+    emit filterChanged(low, high);
+}
+
+// ── Adaptive RX filter (RFC #3878) ──────────────────────────────────────
+// Client-side only: the radio does not store these toggles/bounds, so they
+// send no command (cf. setQsk). The engine drives the actual passband via
+// applyAdaptiveFilter(); the filter edges themselves remain radio-authoritative.
+
+void SliceModel::setAdaptiveFilterEnabled(bool on)
+{
+    if (m_adaptiveFilterEnabled == on) return;
+    m_adaptiveFilterEnabled = on;
+    // Disabling drops any live-fit indication; the engine restores the
+    // operator's selected filter separately.
+    if (!on) setAdaptiveActive(false);
+    emit adaptiveFilterEnabledChanged(on);
+}
+
+void SliceModel::setAdaptiveMinLowCut(int hz)
+{
+    if (m_adaptiveMinLowCut == hz) return;
+    m_adaptiveMinLowCut = hz;
+    emit adaptiveMinLowCutChanged(hz);
+}
+
+void SliceModel::setAdaptiveMaxHighCut(int hz)
+{
+    if (m_adaptiveMaxHighCut == hz) return;
+    m_adaptiveMaxHighCut = hz;
+    emit adaptiveMaxHighCutChanged(hz);
+}
+
+void SliceModel::setAdaptiveActive(bool on)
+{
+    if (m_adaptiveActive == on) return;
+    m_adaptiveActive = on;
+    emit adaptiveActiveChanged(on);
+}
+
+void SliceModel::applyAdaptiveFilter(int low, int high)
+{
+    // Identical wire effect to setFilterWidth() — the radio stays
+    // authoritative and we never persist the edges. Kept as a separate entry
+    // point so the engine can distinguish its own writes from a user's
+    // preset/drag for baseline tracking.
+    m_filterLow  = low;
+    m_filterHigh = high;
     sendCommand(QString("filt %1 %2 %3").arg(m_id).arg(low).arg(high));
     emit filterChanged(low, high);
 }

@@ -38,6 +38,8 @@
 #include <QStackedWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QGridLayout>
 #include <QMenu>
 #include <QDoubleSpinBox>
@@ -2923,6 +2925,67 @@ void VfoWidget::saveDisplayPrefs()
     s.save();
 }
 
+// Adaptive RX filter config — one self-contained object under a single root
+// key (Principle V), per slice. The filter edges themselves stay radio-
+// authoritative and are never persisted (Principle III). RFC #3878.
+void VfoWidget::loadAdaptivePrefs()
+{
+    if (!m_slice) return;
+    const QJsonObject root = QJsonDocument::fromJson(
+        AppSettings::instance().value("AdaptiveFilter", QString{})
+            .toString().toUtf8()).object();
+    const QJsonObject o = root.value(QString::number(m_slice->sliceId())).toObject();
+    m_slice->setAdaptiveMinLowCut(o.value("minLowCut").toInt(0));
+    m_slice->setAdaptiveMaxHighCut(o.value("maxHighCut").toInt(4000));
+    m_slice->setAdaptiveFilterEnabled(o.value("enabled").toBool(false));
+}
+
+void VfoWidget::saveAdaptivePrefs()
+{
+    if (!m_slice) return;
+    auto& s = AppSettings::instance();
+    QJsonObject root = QJsonDocument::fromJson(
+        s.value("AdaptiveFilter", QString{}).toString().toUtf8()).object();
+    QJsonObject o;
+    o["enabled"]    = m_slice->adaptiveFilterEnabled();
+    o["minLowCut"]  = m_slice->adaptiveMinLowCut();
+    o["maxHighCut"] = m_slice->adaptiveMaxHighCut();
+    root[QString::number(m_slice->sliceId())] = o;
+    s.setValue("AdaptiveFilter",
+               QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact)));
+    s.save();
+}
+
+// Hide the Min low-cut / Max high-cut rows when the Adaptive RX filter is off.
+// Driven from the slice state (the source of truth) so it stays correct whether
+// the feature is toggled by the user OR disabled programmatically (e.g. the
+// engine disabling adaptive on a manual filter edit, where the checkbox is set
+// with signals blocked and the toggled handler never fires). RFC #3878.
+void VfoWidget::updateAdaptiveBoundsVisible()
+{
+    const bool on = m_slice && m_slice->adaptiveFilterEnabled();
+    if (m_adaptiveLoRow) m_adaptiveLoRow->setVisible(on);
+    if (m_adaptiveHiRow) m_adaptiveHiRow->setVisible(on);
+
+    // Hiding the child rows shrinks the adaptive container, but its OWN layout's
+    // cached sizeHint must be invalidated explicitly: relayoutToCurrentContent()
+    // invalidates only the page/top layouts, so the page would otherwise recompute
+    // its height from this container's stale (taller) hint and the flag would never
+    // shrink. invalidate() clears the cache; updateGeometry() propagates the change
+    // up the grid -> page chain so the deferred relayout reads the new size.
+    if (m_adaptiveContainer) {
+        if (auto* l = m_adaptiveContainer->layout()) l->invalidate();
+        m_adaptiveContainer->updateGeometry();
+    }
+
+    // Shrink/grow the flag to fit only the visible controls. Deferred to the
+    // next event-loop turn so the show/hide is laid out before relayout reads
+    // the page sizeHint (same stale-height caveat as the mode rebuild, #3853).
+    if (m_tabStack && m_tabStack->isVisible()) {
+        QTimer::singleShot(0, this, [this] { relayoutToCurrentContent(); });
+    }
+}
+
 void VfoWidget::setEscLevel(float dbm)
 {
     m_escLevelDbm = dbm;
@@ -3840,6 +3903,10 @@ void VfoWidget::setSlice(SliceModel* slice)
     // runs after wireVfoWidget() has connected markerStyleChanged (#1526).
     loadDisplayPrefs();
     emit markerStyleChanged(m_markerWidth, m_filterEdgesHidden);
+    // Restore the per-slice adaptive RX filter config (RFC #3878). This pushes
+    // the enabled state into the slice model, which (via wiring) updates the
+    // panadapter overlay and the engine.
+    loadAdaptivePrefs();
 
     // Frequency
     connect(m_slice, &SliceModel::frequencyChanged, this, [this](double) { updateFreqLabel(); });
@@ -3981,6 +4048,19 @@ void VfoWidget::setSlice(SliceModel* slice)
     connect(m_slice, &SliceModel::filterChanged, this, [this](int, int) {
         updateFilterLabel();
         updateFilterHighlight();
+    });
+    // Adaptive RX filter (RFC #3878): AUTO badge follows the live-fit state;
+    // keep the Mode-tab checkbox in sync if the enable changes elsewhere.
+    connect(m_slice, &SliceModel::adaptiveActiveChanged, this, [this](bool) {
+        updateFilterLabel();
+    });
+    connect(m_slice, &SliceModel::adaptiveFilterEnabledChanged, this, [this](bool on) {
+        updateFilterLabel();
+        if (m_adaptiveChk && m_adaptiveChk->isChecked() != on) {
+            QSignalBlocker b(m_adaptiveChk);
+            m_adaptiveChk->setChecked(on);
+        }
+        updateAdaptiveBoundsVisible();
     });
     // Antennas
     connect(m_slice, &SliceModel::rxAntennaChanged, this, [this](const QString& ant) {
@@ -4599,6 +4679,13 @@ void VfoWidget::scheduleFrequencyAnnouncement(const QString& text)
 void VfoWidget::updateFilterLabel()
 {
     if (!m_slice) return;
+    // Adaptive RX filter: show "AUTO" while a confident live fit is applied
+    // (RFC #3878). Otherwise the normal width readout — feature off, or the
+    // weak-signal fallback to the operator's selected filter.
+    if (m_slice->adaptiveFilterEnabled() && m_slice->adaptiveActive()) {
+        m_filterWidthLbl->setText(QStringLiteral("AUTO"));
+        return;
+    }
     // Single source of truth with the RX applet's filter readout to keep both
     // labels in sync — they previously drifted (#794, #1225, #2197).
     m_filterWidthLbl->setText(RxApplet::formatFilterWidth(
@@ -4884,6 +4971,17 @@ void VfoWidget::rebuildFilterButtons()
     // Remove marker-style buttons if they exist (re-added for CW only, #1526)
     if (m_markerThicknessBtn) { delete m_markerThicknessBtn; m_markerThicknessBtn = nullptr; }
     if (m_edgesBtn)           { delete m_edgesBtn;           m_edgesBtn = nullptr; }
+    // Remove the adaptive-filter controls (re-added for SSB only, RFC #3878).
+    // Deleting the container takes its children (checkbox + combo rows) with it.
+    if (m_adaptiveContainer) {
+        delete m_adaptiveContainer;
+        m_adaptiveContainer = nullptr;
+        m_adaptiveChk = nullptr;
+        m_adaptiveMinLowCmb = nullptr;
+        m_adaptiveMaxHighCmb = nullptr;
+        m_adaptiveLoRow = nullptr;
+        m_adaptiveHiRow = nullptr;
+    }
 
     for (int i = 0; i < m_filterWidths.size(); ++i) {
         const int w = m_filterWidths[i];
@@ -4996,6 +5094,105 @@ void VfoWidget::rebuildFilterButtons()
             setFilterEdgesHidden(!on);
         });
         m_filterGrid->addWidget(m_edgesBtn, row, 2, 1, 2);
+    }
+
+    // ── Adaptive RX filter controls (SSB only) — RFC #3878 ───────────────
+    // Built only for USB/LSB; the grid is rebuilt on every mode change, so
+    // SSB-only visibility is handled by presence/absence (not setVisible).
+    if (m_slice && (m_slice->mode() == "USB" || m_slice->mode() == "LSB")) {
+        const int arow = (m_filterWidths.size() + 3) / 4 + 1;
+        m_adaptiveContainer = new QWidget;
+        auto* av = new QVBoxLayout(m_adaptiveContainer);
+        av->setContentsMargins(0, 2, 0, 0);
+        av->setSpacing(3);
+
+        // Separator — same style as the S-meter/SmartMTR config menu.
+        auto* sep = new QFrame;
+        sep->setFrameShape(QFrame::HLine);
+        sep->setFrameShadow(QFrame::Plain);
+        sep->setFixedHeight(1);
+        sep->setStyleSheet("QFrame { border: none; background: #304050; max-height: 1px; }");
+        sep->setAttribute(Qt::WA_TransparentForMouseEvents);
+        av->addWidget(sep);
+
+        // Checkbox — "Adaptive RX filter".
+        m_adaptiveChk = new QCheckBox(tr("Adaptive RX filter"));
+        m_adaptiveChk->setCursor(Qt::PointingHandCursor);
+        m_adaptiveChk->setStyleSheet(
+            "QCheckBox { background: transparent; color: #c8d8e8; font-size: 12px; spacing: 5px; }"
+            "QCheckBox::indicator { width: 13px; height: 13px; border-radius: 2px; "
+            "border: 1px solid #304050; background: #1a2a3a; }"
+            "QCheckBox::indicator:checked { background: #0070c0; border: 1px solid #0090e0; }"
+            "QCheckBox:disabled { color: #5a6a78; }"
+            "QCheckBox::indicator:disabled { border: 1px solid #243240; background: #141f2a; }");
+        m_adaptiveChk->setChecked(m_slice->adaptiveFilterEnabled());
+        m_adaptiveChk->setAccessibleName(tr("Adaptive RX filter"));
+        m_adaptiveChk->setAccessibleDescription(
+            tr("Automatically fit the SSB RX passband to the received signal width"));
+        av->addWidget(m_adaptiveChk);
+
+        const auto makeOptLabel = [](const QString& text) {
+            auto* lbl = new QLabel(text);
+            lbl->setStyleSheet("QLabel { background: transparent; border: none; "
+                               "color: #c8d8e8; font-size: 12px; } "
+                               "QLabel:disabled { color: #5e6e7c; }");
+            return lbl;
+        };
+
+        // Min low-cut combo.
+        auto* loRow = new QWidget;
+        loRow->setAttribute(Qt::WA_TranslucentBackground);
+        auto* loLay = new QHBoxLayout(loRow);
+        loLay->setContentsMargins(0, 0, 0, 0);
+        loLay->setSpacing(4);
+        loLay->addWidget(makeOptLabel(tr("Min low-cut")));
+        m_adaptiveMinLowCmb = new QComboBox;
+        for (int v : {0, 50, 100, 200}) m_adaptiveMinLowCmb->addItem(QString::number(v), v);
+        AetherSDR::applyComboStyle(m_adaptiveMinLowCmb);
+        m_adaptiveMinLowCmb->setCurrentIndex(
+            std::max(0, m_adaptiveMinLowCmb->findData(m_slice->adaptiveMinLowCut())));
+        m_adaptiveMinLowCmb->setAccessibleName(tr("Adaptive minimum low cut (Hz)"));
+        loLay->addWidget(m_adaptiveMinLowCmb, 1);
+        av->addWidget(loRow);
+        m_adaptiveLoRow = loRow;
+
+        // Max high-cut combo.
+        auto* hiRow = new QWidget;
+        hiRow->setAttribute(Qt::WA_TranslucentBackground);
+        auto* hiLay = new QHBoxLayout(hiRow);
+        hiLay->setContentsMargins(0, 0, 0, 0);
+        hiLay->setSpacing(4);
+        hiLay->addWidget(makeOptLabel(tr("Max high-cut")));
+        m_adaptiveMaxHighCmb = new QComboBox;
+        for (int v : {3000, 3500, 4000, 6000}) m_adaptiveMaxHighCmb->addItem(QString::number(v), v);
+        AetherSDR::applyComboStyle(m_adaptiveMaxHighCmb);
+        m_adaptiveMaxHighCmb->setCurrentIndex(
+            std::max(0, m_adaptiveMaxHighCmb->findData(m_slice->adaptiveMaxHighCut())));
+        m_adaptiveMaxHighCmb->setAccessibleName(tr("Adaptive maximum high cut (Hz)"));
+        hiLay->addWidget(m_adaptiveMaxHighCmb, 1);
+        av->addWidget(hiRow);
+        m_adaptiveHiRow = hiRow;
+
+        // Bounds are only meaningful when the feature is on (hidden otherwise).
+        updateAdaptiveBoundsVisible();
+
+        connect(m_adaptiveChk, &QCheckBox::toggled, this, [this](bool on) {
+            if (m_slice) m_slice->setAdaptiveFilterEnabled(on);
+            updateAdaptiveBoundsVisible();
+            saveAdaptivePrefs();
+        });
+        connect(m_adaptiveMinLowCmb, &QComboBox::currentIndexChanged, this, [this](int) {
+            if (m_slice && m_adaptiveMinLowCmb)
+                m_slice->setAdaptiveMinLowCut(m_adaptiveMinLowCmb->currentData().toInt());
+            saveAdaptivePrefs();
+        });
+        connect(m_adaptiveMaxHighCmb, &QComboBox::currentIndexChanged, this, [this](int) {
+            if (m_slice && m_adaptiveMaxHighCmb)
+                m_slice->setAdaptiveMaxHighCut(m_adaptiveMaxHighCmb->currentData().toInt());
+            saveAdaptivePrefs();
+        });
+
+        m_filterGrid->addWidget(m_adaptiveContainer, arow, 0, 1, 4);
     }
 
     // Add CW autotune row spanning all 4 columns when in CW mode

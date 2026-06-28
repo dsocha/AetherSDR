@@ -521,6 +521,7 @@ set(CORE_SOURCES
     src/core/AppSettings.cpp
     src/core/GpuSelector.cpp
     src/core/AgcTCalibrator.cpp
+    src/core/AdaptiveFilterEngine.cpp
     src/core/SettingsHelpers.cpp
     src/core/ThemeManager.cpp
     src/core/BandStackSettings.cpp
