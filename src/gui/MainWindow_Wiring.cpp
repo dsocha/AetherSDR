@@ -3753,6 +3753,11 @@ void MainWindow::onSpectrumReadyForAdaptiveFilter(quint32 streamId,
 {
     Q_UNUSED(emittedNs);
     if (m_shuttingDown || !m_panStack) return;
+    // Suspend while transmitting: the panadapter shows the TX signal (or muted
+    // RX), so fitting against it would chase garbage. Returning early holds the
+    // current passband and per-slice state untouched, so the fit resumes cleanly
+    // on unkey instead of re-fitting from scratch.
+    if (m_radioModel.isRadioTransmitting()) return;
     if (!m_adaptiveFilterEngine)
         m_adaptiveFilterEngine = new AdaptiveFilterEngine(this);
 
