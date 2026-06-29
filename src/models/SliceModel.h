@@ -48,6 +48,9 @@ public:
     bool    adaptiveFilterEnabled() const { return m_adaptiveFilterEnabled; }
     int     adaptiveMinLowCut()     const { return m_adaptiveMinLowCut; }  // Hz
     int     adaptiveMaxHighCut()    const { return m_adaptiveMaxHighCut; } // Hz
+    int     adaptiveMinSnr()        const { return m_adaptiveMinSnr; }   // 0=Sensitive,1=Normal,2=Strong
+    int     adaptiveResponse()      const { return m_adaptiveResponse; } // 0=Fast,1=Normal,2=Slow
+    int     adaptiveSplatter()      const { return m_adaptiveSplatter; } // 0=Tight,1=Normal,2=Wide
     bool    adaptiveActive()        const { return m_adaptiveActive; }
     bool    isActive()   const { return m_active; }
     bool    isTxSlice()  const { return m_txSlice; }
@@ -155,6 +158,9 @@ public:
     void setAdaptiveFilterEnabled(bool on);
     void setAdaptiveMinLowCut(int hz);
     void setAdaptiveMaxHighCut(int hz);
+    void setAdaptiveMinSnr(int level);     // 0=Sensitive,1=Normal,2=Strong
+    void setAdaptiveResponse(int level);   // 0=Fast,1=Normal,2=Slow
+    void setAdaptiveSplatter(int level);   // 0=Tight,1=Normal,2=Wide
     void setAdaptiveActive(bool on);
     // Engine-driven passband write: same wire command as setFilterWidth, but
     // a distinct entry point so the engine can recognise its own writes (vs
@@ -261,6 +267,9 @@ signals:
     void adaptiveFilterEnabledChanged(bool on);
     void adaptiveMinLowCutChanged(int hz);
     void adaptiveMaxHighCutChanged(int hz);
+    void adaptiveMinSnrChanged(int level);
+    void adaptiveResponseChanged(int level);
+    void adaptiveSplatterChanged(int level);
     void adaptiveActiveChanged(bool on);
     void activeChanged(bool active);
     void txSliceChanged(bool tx);
@@ -346,6 +355,9 @@ private:
     bool    m_adaptiveFilterEnabled{false};
     int     m_adaptiveMinLowCut{0};      // Hz, one of {0,50,100,200}
     int     m_adaptiveMaxHighCut{4000};  // Hz, one of {3000,3500,4000,6000}
+    int     m_adaptiveMinSnr{1};         // 0=Sensitive,1=Normal,2=Strong
+    int     m_adaptiveResponse{1};       // 0=Fast,1=Normal,2=Slow
+    int     m_adaptiveSplatter{1};       // 0=Tight,1=Normal,2=Wide
     bool    m_adaptiveActive{false};     // a confident live fit is applied
     bool    m_active{false};
     bool    m_txSlice{false};

@@ -122,6 +122,30 @@ void SliceModel::setAdaptiveMaxHighCut(int hz)
     emit adaptiveMaxHighCutChanged(hz);
 }
 
+void SliceModel::setAdaptiveMinSnr(int level)
+{
+    level = std::clamp(level, 0, 2);
+    if (m_adaptiveMinSnr == level) return;
+    m_adaptiveMinSnr = level;
+    emit adaptiveMinSnrChanged(level);
+}
+
+void SliceModel::setAdaptiveResponse(int level)
+{
+    level = std::clamp(level, 0, 2);
+    if (m_adaptiveResponse == level) return;
+    m_adaptiveResponse = level;
+    emit adaptiveResponseChanged(level);
+}
+
+void SliceModel::setAdaptiveSplatter(int level)
+{
+    level = std::clamp(level, 0, 2);
+    if (m_adaptiveSplatter == level) return;
+    m_adaptiveSplatter = level;
+    emit adaptiveSplatterChanged(level);
+}
+
 void SliceModel::setAdaptiveActive(bool on)
 {
     if (m_adaptiveActive == on) return;

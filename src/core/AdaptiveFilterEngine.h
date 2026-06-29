@@ -5,48 +5,11 @@
 #include <QString>
 #include <QVector>
 
+#include "core/OccupiedRegion.h"   // OccupiedRegion + measureOccupiedRegion()
+
 namespace AetherSDR {
 
 class SliceModel;
-
-// Result of a single-signal occupied-bandwidth measurement, in *audio*
-// magnitudes (Hz from the suppressed carrier, always low < high). The caller
-// maps these to signed filter offsets per mode (USB: lo=+low, hi=+high;
-// LSB: lo=-high, hi=-low).
-struct OccupiedRegion {
-    bool   valid{false};   // a confident measurement was obtained
-    int    lowHz{0};       // low-cut: nearest-carrier edge of the energy
-    int    highHz{0};      // high-cut: far edge of the energy
-    float  peakDbm{-1000.0f};
-};
-
-// measureOccupiedRegion — a NEW single-signal occupied-bandwidth edge-finder
-// (RFC #3878). This is deliberately NOT VoiceSignalDetector::detectVoiceSignals(),
-// which is a band-scan marker detector that splits wide regions into ~2.7 kHz
-// chunks and would fragment a wide ESSB signal. Here we anchor on the slice
-// carrier, scan only a local window on the signal's energy side, find the peak,
-// and take the contiguous run above a peak-relative threshold (so a strength-
-// independent width, and an adjacent station separated by a sub-threshold valley
-// is naturally excluded — clarity over bandwidth). Only the noise-floor gating
-// idea is shared with VoiceSignalDetector.
-//
-//  binsDbm        full-pan FFT magnitudes (dBm)
-//  centerMhz/bandwidthMhz   the pan span
-//  carrierMhz     the slice's suppressed-carrier frequency
-//  mode           "USB" or "LSB" (selects the energy side)
-//  noiseFloorDbm  rolling floor from SpectrumWidget (sentinel <= -500 => unknown)
-//  avgEnv         in/out per-slice temporal average (video averaging): a
-//                 per-offset EMA of the envelope that reduces frame-to-frame
-//                 noise before the edge threshold — stabilises edges on
-//                 weak/medium signals. Persistent per-slice; reinit on geometry
-//                 change. (NOT a peak-hold — a per-bin peak-hold accumulated and
-//                 inflated the width over time; QSB is ridden by the bounded
-//                 edge peak-hold instead.)
-OccupiedRegion measureOccupiedRegion(const QVector<float>& binsDbm,
-                                     double centerMhz, double bandwidthMhz,
-                                     double carrierMhz, const QString& mode,
-                                     float noiseFloorDbm,
-                                     QVector<float>& avgEnv);
 
 // AdaptiveFilterEngine — GUI-thread coordinator that, for each SSB slice with
 // the adaptive filter enabled, measures the occupied bandwidth of the tuned

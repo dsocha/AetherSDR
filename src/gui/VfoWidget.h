@@ -509,8 +509,14 @@ private:
     class QCheckBox* m_adaptiveChk{nullptr};
     class QComboBox* m_adaptiveMinLowCmb{nullptr};
     class QComboBox* m_adaptiveMaxHighCmb{nullptr};
-    class QWidget*   m_adaptiveLoRow{nullptr};   // bound-combo rows: greyed when
+    class QComboBox* m_adaptiveMinSnrCmb{nullptr};
+    class QComboBox* m_adaptiveResponseCmb{nullptr};
+    class QComboBox* m_adaptiveSplatterCmb{nullptr};
+    class QWidget*   m_adaptiveLoRow{nullptr};   // config rows: hidden when
     class QWidget*   m_adaptiveHiRow{nullptr};   // the Adaptive checkbox is off
+    class QWidget*   m_adaptiveSnrRow{nullptr};
+    class QWidget*   m_adaptiveResponseRow{nullptr};
+    class QWidget*   m_adaptiveSplatterRow{nullptr};
     void loadAdaptivePrefs();   // single nested key AppSettings["AdaptiveFilter"]
     void saveAdaptivePrefs();
     void updateAdaptiveBoundsVisible();  // hide the bound rows when adaptive off

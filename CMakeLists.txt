@@ -522,6 +522,7 @@ set(CORE_SOURCES
     src/core/GpuSelector.cpp
     src/core/AgcTCalibrator.cpp
     src/core/AdaptiveFilterEngine.cpp
+    src/core/OccupiedRegion.cpp
     src/core/SettingsHelpers.cpp
     src/core/ThemeManager.cpp
     src/core/BandStackSettings.cpp
@@ -1914,6 +1915,14 @@ add_executable(spectral_nr_test
 target_include_directories(spectral_nr_test PRIVATE src)
 target_link_libraries(spectral_nr_test PRIVATE Qt6::Core)
 add_test(NAME spectral_nr_test COMMAND spectral_nr_test)
+
+add_executable(adaptive_filter_test
+    tests/adaptive_filter_test.cpp
+    src/core/OccupiedRegion.cpp
+)
+target_include_directories(adaptive_filter_test PRIVATE src)
+target_link_libraries(adaptive_filter_test PRIVATE Qt6::Core)
+add_test(NAME adaptive_filter_test COMMAND adaptive_filter_test)
 
 add_executable(kiwi_sdr_protocol_test
     tests/kiwi_sdr_protocol_test.cpp

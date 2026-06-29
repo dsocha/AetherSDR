@@ -2937,6 +2937,9 @@ void VfoWidget::loadAdaptivePrefs()
     const QJsonObject o = root.value(QString::number(m_slice->sliceId())).toObject();
     m_slice->setAdaptiveMinLowCut(o.value("minLowCut").toInt(0));
     m_slice->setAdaptiveMaxHighCut(o.value("maxHighCut").toInt(4000));
+    m_slice->setAdaptiveMinSnr(o.value("minSnr").toInt(1));      // default Normal
+    m_slice->setAdaptiveResponse(o.value("response").toInt(1));  // default Normal
+    m_slice->setAdaptiveSplatter(o.value("splatter").toInt(1));  // default Normal
     m_slice->setAdaptiveFilterEnabled(o.value("enabled").toBool(false));
 }
 
@@ -2950,6 +2953,9 @@ void VfoWidget::saveAdaptivePrefs()
     o["enabled"]    = m_slice->adaptiveFilterEnabled();
     o["minLowCut"]  = m_slice->adaptiveMinLowCut();
     o["maxHighCut"] = m_slice->adaptiveMaxHighCut();
+    o["minSnr"]     = m_slice->adaptiveMinSnr();
+    o["response"]   = m_slice->adaptiveResponse();
+    o["splatter"]   = m_slice->adaptiveSplatter();
     root[QString::number(m_slice->sliceId())] = o;
     s.setValue("AdaptiveFilter",
                QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Compact)));
@@ -2964,8 +2970,11 @@ void VfoWidget::saveAdaptivePrefs()
 void VfoWidget::updateAdaptiveBoundsVisible()
 {
     const bool on = m_slice && m_slice->adaptiveFilterEnabled();
-    if (m_adaptiveLoRow) m_adaptiveLoRow->setVisible(on);
-    if (m_adaptiveHiRow) m_adaptiveHiRow->setVisible(on);
+    if (m_adaptiveLoRow)       m_adaptiveLoRow->setVisible(on);
+    if (m_adaptiveHiRow)       m_adaptiveHiRow->setVisible(on);
+    if (m_adaptiveSnrRow)      m_adaptiveSnrRow->setVisible(on);
+    if (m_adaptiveResponseRow) m_adaptiveResponseRow->setVisible(on);
+    if (m_adaptiveSplatterRow) m_adaptiveSplatterRow->setVisible(on);
 
     // Hiding the child rows shrinks the adaptive container, but its OWN layout's
     // cached sizeHint must be invalidated explicitly: relayoutToCurrentContent()
@@ -4979,8 +4988,14 @@ void VfoWidget::rebuildFilterButtons()
         m_adaptiveChk = nullptr;
         m_adaptiveMinLowCmb = nullptr;
         m_adaptiveMaxHighCmb = nullptr;
+        m_adaptiveMinSnrCmb = nullptr;
+        m_adaptiveResponseCmb = nullptr;
+        m_adaptiveSplatterCmb = nullptr;
         m_adaptiveLoRow = nullptr;
         m_adaptiveHiRow = nullptr;
+        m_adaptiveSnrRow = nullptr;
+        m_adaptiveResponseRow = nullptr;
+        m_adaptiveSplatterRow = nullptr;
     }
 
     for (int i = 0; i < m_filterWidths.size(); ++i) {
@@ -5173,6 +5188,39 @@ void VfoWidget::rebuildFilterButtons()
         av->addWidget(hiRow);
         m_adaptiveHiRow = hiRow;
 
+        // Preset combos (3 levels each): Minimum SNR, Response speed, Splatter
+        // rejection. The combo index IS the level (0/1/2) stored on the slice.
+        const auto makePresetRow = [&](const QString& label,
+                                       std::initializer_list<QString> opts,
+                                       int cur, const QString& accName)
+            -> std::pair<QWidget*, QComboBox*> {
+            auto* row = new QWidget;
+            row->setAttribute(Qt::WA_TranslucentBackground);
+            auto* lay = new QHBoxLayout(row);
+            lay->setContentsMargins(0, 0, 0, 0);
+            lay->setSpacing(4);
+            lay->addWidget(makeOptLabel(label));
+            auto* cmb = new QComboBox;
+            int idx = 0;
+            for (const QString& o : opts) cmb->addItem(o, idx++);
+            AetherSDR::applyComboStyle(cmb);
+            cmb->setCurrentIndex(std::clamp(cur, 0, static_cast<int>(opts.size()) - 1));
+            cmb->setAccessibleName(accName);
+            lay->addWidget(cmb, 1);
+            av->addWidget(row);
+            return {row, cmb};
+        };
+
+        std::tie(m_adaptiveSnrRow, m_adaptiveMinSnrCmb) = makePresetRow(
+            tr("Min SNR"), {tr("Sensitive"), tr("Normal"), tr("Strong")},
+            m_slice->adaptiveMinSnr(), tr("Adaptive minimum SNR"));
+        std::tie(m_adaptiveResponseRow, m_adaptiveResponseCmb) = makePresetRow(
+            tr("Response"), {tr("Fast"), tr("Normal"), tr("Slow")},
+            m_slice->adaptiveResponse(), tr("Adaptive response speed"));
+        std::tie(m_adaptiveSplatterRow, m_adaptiveSplatterCmb) = makePresetRow(
+            tr("Splatter"), {tr("Tight"), tr("Normal"), tr("Wide")},
+            m_slice->adaptiveSplatter(), tr("Adaptive splatter rejection"));
+
         // Bounds are only meaningful when the feature is on (hidden otherwise).
         updateAdaptiveBoundsVisible();
 
@@ -5189,6 +5237,18 @@ void VfoWidget::rebuildFilterButtons()
         connect(m_adaptiveMaxHighCmb, &QComboBox::currentIndexChanged, this, [this](int) {
             if (m_slice && m_adaptiveMaxHighCmb)
                 m_slice->setAdaptiveMaxHighCut(m_adaptiveMaxHighCmb->currentData().toInt());
+            saveAdaptivePrefs();
+        });
+        connect(m_adaptiveMinSnrCmb, &QComboBox::currentIndexChanged, this, [this](int i) {
+            if (m_slice) m_slice->setAdaptiveMinSnr(i);
+            saveAdaptivePrefs();
+        });
+        connect(m_adaptiveResponseCmb, &QComboBox::currentIndexChanged, this, [this](int i) {
+            if (m_slice) m_slice->setAdaptiveResponse(i);
+            saveAdaptivePrefs();
+        });
+        connect(m_adaptiveSplatterCmb, &QComboBox::currentIndexChanged, this, [this](int i) {
+            if (m_slice) m_slice->setAdaptiveSplatter(i);
             saveAdaptivePrefs();
         });
 

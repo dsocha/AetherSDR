@@ -10317,10 +10317,11 @@ void SpectrumWidget::drawSliceMarkers(QPainter& p, const QRect& specRect, const 
             haloText(lxR, lblR);
 
             // Status ball just outside the HIGH-CUT label (RFC #3878):
-            // green = AUTO fit applied, red = enabled but not applied (e.g.
-            // signal too weak). The high-cut is the edge farthest from the
-            // carrier — the larger |offset| — which is the right edge for USB
-            // and the left edge for LSB.
+            // green = AUTO fit applied, gray = enabled but idle (no signal to
+            // fit right now — e.g. weak signal or holding). Idle is a normal
+            // waiting state, not an error, so it reads neutral rather than red.
+            // The high-cut is the edge farthest from the carrier — the larger
+            // |offset| — which is the right edge for USB and the left edge for LSB.
             const bool hiOnRight = qAbs(so.filterHighHz) >= qAbs(so.filterLowHz);
             const int  ballR = 4;
             const int  bgap  = 5;
@@ -10329,7 +10330,7 @@ void SpectrumWidget::drawSliceMarkers(QPainter& p, const QRect& specRect, const 
                 : lxL - bgap - ballR;                               // outward (left)
             const QColor ballCol = so.adaptiveActive
                 ? AetherSDR::theme::withAlpha("color.accent.success", 255)
-                : AetherSDR::theme::withAlpha("color.accent.danger", 255);
+                : AetherSDR::theme::withAlpha("color.text.disabled", 255);
             p.setPen(QPen(QColor(0, 0, 0, 160), 1));   // dark outline for contrast
             p.setBrush(ballCol);
             p.drawEllipse(QPoint(ballCx, floorY), ballR, ballR);
