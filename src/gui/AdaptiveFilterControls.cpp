@@ -20,7 +20,8 @@
 namespace AetherSDR {
 
 AdaptiveFilterControls::AdaptiveFilterControls(int sections, bool withHeader,
-                                               bool compact, QWidget* parent)
+                                               bool compact, bool twoColumn,
+                                               QWidget* parent)
     : QWidget(parent)
 {
     // Compact preset matches the dense applet rows (smaller text, shorter combos);
@@ -31,7 +32,10 @@ AdaptiveFilterControls::AdaptiveFilterControls(int sections, bool withHeader,
                                                  // the applet's mode/SQL controls
 
     auto* av = new QVBoxLayout(this);
-    av->setContentsMargins(0, compact ? 0 : 2, 0, 0);
+    // Small bottom margin so the group isn't flush against the flag's edge
+    // (matches the S-meter/SmartMTR menu). Harmless in the applet, where a
+    // stretch sits below this widget.
+    av->setContentsMargins(0, compact ? 0 : 2, 0, 6);
     av->setSpacing(compact ? 2 : 3);
 
     if (withHeader) {
@@ -43,6 +47,25 @@ AdaptiveFilterControls::AdaptiveFilterControls(int sections, bool withHeader,
         sep->setStyleSheet("QFrame { border: none; background: #304050; max-height: 1px; }");
         sep->setAttribute(Qt::WA_TransparentForMouseEvents);
         av->addWidget(sep);
+    }
+
+    // Single column by default; in twoColumn mode the checkbox + filter bounds go
+    // left and the behaviour presets go right (applet-style), at the same 40/60
+    // proportions as the surrounding controls.
+    QVBoxLayout* leftTarget  = av;
+    QVBoxLayout* rightTarget = av;
+    if (twoColumn) {
+        auto* cols = new QHBoxLayout;
+        cols->setContentsMargins(0, 0, 0, 0);
+        cols->setSpacing(8);
+        cols->setAlignment(Qt::AlignTop);
+        leftTarget  = new QVBoxLayout; leftTarget->setContentsMargins(0, 0, 0, 0);
+        leftTarget->setSpacing(av->spacing());
+        rightTarget = new QVBoxLayout; rightTarget->setContentsMargins(0, 0, 0, 0);
+        rightTarget->setSpacing(av->spacing());
+        cols->addLayout(leftTarget, 2);
+        cols->addLayout(rightTarget, 3);
+        av->addLayout(cols);
     }
 
     // Checkbox — "Adaptive RX filter".
@@ -60,7 +83,7 @@ AdaptiveFilterControls::AdaptiveFilterControls(int sections, bool withHeader,
         m_chk->setAccessibleName(tr("Adaptive RX filter"));
         m_chk->setAccessibleDescription(
             tr("Automatically fit the SSB RX passband to the received signal width"));
-        av->addWidget(m_chk);
+        leftTarget->addWidget(m_chk);
     }
 
     const auto makeOptLabel = [fpx](const QString& text) {
@@ -76,7 +99,7 @@ AdaptiveFilterControls::AdaptiveFilterControls(int sections, bool withHeader,
     // full name as a tooltip; the combo is allowed to shrink (it does not impose
     // its longest item's width) so the row never forces the host column wider and
     // breaks the applet's 2-column split. accName is the full, descriptive name.
-    const auto makeRow = [&](const QString& label, const QString& accName)
+    const auto makeRow = [&](QVBoxLayout* target, const QString& label, const QString& accName)
         -> std::pair<QWidget*, QComboBox*> {
         auto* row = new QWidget;
         row->setAttribute(Qt::WA_TranslucentBackground);
@@ -98,26 +121,26 @@ AdaptiveFilterControls::AdaptiveFilterControls(int sections, bool withHeader,
         cmb->setAccessibleName(accName);
         cmb->setToolTip(accName);
         lay->addWidget(cmb, 1);
-        av->addWidget(row);
+        target->addWidget(row);
         return {row, cmb};
     };
 
-    // Bound combos (Hz value stored as item data). Short labels keep the rows
-    // inside the host column; the full name is the tooltip/accessible name.
+    // Bound combos (Hz value stored as item data) -> left column. Short labels
+    // keep the rows narrow; the full name is the tooltip/accessible name.
     if (sections & SecBounds) {
-        std::tie(m_loRow, m_minLow) = makeRow(tr("Lo cut"), tr("Adaptive minimum low-cut (Hz)"));
+        std::tie(m_loRow, m_minLow) = makeRow(leftTarget, tr("Lo cut"), tr("Adaptive minimum low-cut (Hz)"));
         for (int v : {0, 50, 100, 200}) m_minLow->addItem(QString::number(v), v);
-        std::tie(m_hiRow, m_maxHigh) = makeRow(tr("Hi cut"), tr("Adaptive maximum high-cut (Hz)"));
+        std::tie(m_hiRow, m_maxHigh) = makeRow(leftTarget, tr("Hi cut"), tr("Adaptive maximum high-cut (Hz)"));
         for (int v : {3000, 3500, 4000, 6000}) m_maxHigh->addItem(QString::number(v), v);
     }
 
-    // Preset combos — the combo INDEX is the level (0/1/2) stored on the slice.
+    // Preset combos (combo INDEX is the level 0/1/2) -> right column.
     if (sections & SecPresets) {
-        std::tie(m_snrRow, m_minSnr) = makeRow(tr("SNR"), tr("Adaptive minimum SNR"));
+        std::tie(m_snrRow, m_minSnr) = makeRow(rightTarget, tr("SNR"), tr("Adaptive minimum SNR"));
         for (const QString& o : {tr("Sensitive"), tr("Normal"), tr("Strong")}) m_minSnr->addItem(o);
-        std::tie(m_responseRow, m_response) = makeRow(tr("Speed"), tr("Adaptive response speed"));
+        std::tie(m_responseRow, m_response) = makeRow(rightTarget, tr("Speed"), tr("Adaptive response speed"));
         for (const QString& o : {tr("Fast"), tr("Normal"), tr("Slow")}) m_response->addItem(o);
-        std::tie(m_splatterRow, m_splatter) = makeRow(tr("Splat"), tr("Adaptive splatter rejection"));
+        std::tie(m_splatterRow, m_splatter) = makeRow(rightTarget, tr("Splat"), tr("Adaptive splatter rejection"));
         for (const QString& o : {tr("Tight"), tr("Normal"), tr("Wide")}) m_splatter->addItem(o);
     }
 

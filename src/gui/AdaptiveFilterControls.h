@@ -33,8 +33,12 @@ public:
         SecAll      = SecCheckbox | SecBounds | SecPresets,
     };
 
+    // twoColumn lays the group out in two sub-columns (left: checkbox + filter
+    // bounds, right: behaviour presets) instead of a single stack — the compact
+    // applet-style arrangement.
     explicit AdaptiveFilterControls(int sections = SecAll, bool withHeader = true,
-                                    bool compact = false, QWidget* parent = nullptr);
+                                    bool compact = false, bool twoColumn = false,
+                                    QWidget* parent = nullptr);
 
     // Re-bind to the active slice (nullptr to detach). Reflects the slice's
     // current values; does NOT load persisted prefs (see loadPrefs).

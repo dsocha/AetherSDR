@@ -5036,7 +5036,8 @@ void VfoWidget::rebuildFilterButtons()
     if (m_slice && (m_slice->mode() == "USB" || m_slice->mode() == "LSB")) {
         const int arow = (m_filterWidths.size() + 3) / 4 + 1;
         m_adaptive = new AdaptiveFilterControls(AdaptiveFilterControls::SecAll,
-                                                /*withHeader=*/true, /*compact=*/false);
+                                                /*withHeader=*/true, /*compact=*/true,
+                                                /*twoColumn=*/true);
         m_adaptive->setSlice(m_slice);
         // Reflow the flag when the control set shows/hides (same deferred relayout
         // the rest of the flag uses, #3853).

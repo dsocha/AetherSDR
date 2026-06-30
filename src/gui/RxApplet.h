@@ -229,13 +229,9 @@ private:
     QGridLayout*            m_filterGrid{nullptr};
     QWidget*                m_filterContainer{nullptr};
     AetherSDR::FilterPassbandWidget* m_filterPassband{nullptr};
-    // Adaptive RX filter control group (SSB only) — shared with the VFO flag,
-    // bound to the active slice. Split across columns: m_adaptive holds the
-    // checkbox + filter bounds (left); m_adaptivePresets holds Min SNR/Response/
-    // Splatter (right). RFC #3878.
-    QWidget*                m_adaptiveBlock{nullptr};   // self-contained 2-col block
-    AdaptiveFilterControls* m_adaptive{nullptr};        // checkbox + filter bounds
-    AdaptiveFilterControls* m_adaptivePresets{nullptr}; // SNR / Speed / Splatter
+    // Adaptive RX filter control group (SSB only) — the same reusable two-column
+    // widget as the VFO flag, bound to the active slice. RFC #3878.
+    AdaptiveFilterControls* m_adaptive{nullptr};
 
     // FM duplex/repeater controls (shown only in FM/NFM/DFM modes)
     QWidget*        m_fmContainer{nullptr};
