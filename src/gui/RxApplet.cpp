@@ -1,4 +1,5 @@
 #include "RxApplet.h"
+#include "AdaptiveFilterControls.h"
 #include "FilterPassbandWidget.h"
 #include "FrequencyEntryParser.h"
 #include "GuardedSlider.h"
@@ -1114,6 +1115,15 @@ void RxApplet::buildUI()
     columns->addLayout(rightCol, 3);  // 60%
 
     root->addLayout(columns);
+
+    // Adaptive RX filter controls (SSB only) — placed as a full-width row BELOW
+    // the two columns so it never unbalances the left/right column heights (which
+    // would expand the right column's stretch and push the RIT/XIT block down).
+    // Same reusable group as the VFO flag, bound to the slice; shown for USB/LSB
+    // by updateModeSettings(). RFC #3878.
+    m_adaptive = new AdaptiveFilterControls(/*withHeader=*/true, /*compact=*/true);
+    m_adaptive->setVisible(false);
+    root->addWidget(m_adaptive);
 
     // Tooltips
     m_lockBtn->setToolTip("Locks the VFO frequency to prevent accidental tuning.");
@@ -2255,6 +2265,9 @@ void RxApplet::connectSlice(SliceModel* s)
 
     // DSP toggles removed — use VFO DSP tab or spectrum overlay
 
+    // Adaptive RX filter — bind the reusable control group to this slice.
+    if (m_adaptive) m_adaptive->setSlice(s);
+
     // RIT
     {
         QSignalBlocker b(m_ritOnBtn);
@@ -2345,6 +2358,7 @@ void RxApplet::connectSlice(SliceModel* s)
 void RxApplet::disconnectSlice(SliceModel* s)
 {
     s->disconnect(this);
+    if (m_adaptive) m_adaptive->setSlice(nullptr);  // drops its own slice signals
     m_savedSquelchOn = false;
 }
 
@@ -2577,6 +2591,9 @@ void RxApplet::updateModeSettings(const QString& mode)
     m_agcContainer->setVisible(!isFM);
     m_ritContainer->setVisible(!isFM);
     m_xitContainer->setVisible(!isFM);
+
+    // Adaptive RX filter is SSB-only.
+    if (m_adaptive) m_adaptive->setVisible(mode == "USB" || mode == "LSB");
 
     // QSK visibility — only meaningful in CW mode
     m_qskBtn->setVisible(mode == "CW");
