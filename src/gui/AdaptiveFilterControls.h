@@ -23,8 +23,18 @@ class AdaptiveFilterControls : public QWidget {
     Q_OBJECT
 
 public:
-    explicit AdaptiveFilterControls(bool withHeader = true, bool compact = false,
-                                    QWidget* parent = nullptr);
+    // Which controls this instance renders — lets the group be split across hosts
+    // (e.g. checkbox+bounds in one column, presets in another), all bound to the
+    // same slice so they stay in sync.
+    enum Section {
+        SecCheckbox = 1 << 0,
+        SecBounds   = 1 << 1,   // Min low-cut + Max high-cut
+        SecPresets  = 1 << 2,   // Min SNR + Response + Splatter
+        SecAll      = SecCheckbox | SecBounds | SecPresets,
+    };
+
+    explicit AdaptiveFilterControls(int sections = SecAll, bool withHeader = true,
+                                    bool compact = false, QWidget* parent = nullptr);
 
     // Re-bind to the active slice (nullptr to detach). Reflects the slice's
     // current values; does NOT load persisted prefs (see loadPrefs).

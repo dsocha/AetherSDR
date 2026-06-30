@@ -22,6 +22,7 @@
 #include <QComboBox>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QFrame>
 #include <QGridLayout>
 #include <QMenu>
 #include <QApplication>
@@ -1116,14 +1117,42 @@ void RxApplet::buildUI()
 
     root->addLayout(columns);
 
-    // Adaptive RX filter controls (SSB only) — placed as a full-width row BELOW
-    // the two columns so it never unbalances the left/right column heights (which
-    // would expand the right column's stretch and push the RIT/XIT block down).
-    // Same reusable group as the VFO flag, bound to the slice; shown for USB/LSB
-    // by updateModeSettings(). RFC #3878.
-    m_adaptive = new AdaptiveFilterControls(/*withHeader=*/true, /*compact=*/true);
-    m_adaptive->setVisible(false);
-    root->addWidget(m_adaptive);
+    // Adaptive RX filter (SSB only) — a SELF-CONTAINED 2-column block BELOW the
+    // main controls, deliberately kept out of the left/right columns above: those
+    // contain the filter passband (expanding size policy), so hosting the adaptive
+    // rows there made toggling them restretch the passband. As its own block the
+    // group just grows downward. Left sub-column = enable checkbox + filter
+    // bounds; right = behaviour presets; both bind to the same slice. Shown for
+    // USB/LSB by updateModeSettings(). RFC #3878.
+    {
+        m_adaptiveBlock = new QWidget;
+        auto* blockV = new QVBoxLayout(m_adaptiveBlock);
+        blockV->setContentsMargins(0, 2, 0, 0);
+        blockV->setSpacing(2);
+
+        auto* sep = new QFrame;
+        sep->setFrameShape(QFrame::HLine);
+        sep->setFrameShadow(QFrame::Plain);
+        sep->setFixedHeight(1);
+        sep->setStyleSheet("QFrame { border: none; background: #304050; max-height: 1px; }");
+        sep->setAttribute(Qt::WA_TransparentForMouseEvents);
+        blockV->addWidget(sep);
+
+        auto* cols = new QHBoxLayout;
+        cols->setSpacing(8);
+        cols->setAlignment(Qt::AlignTop);
+        m_adaptive = new AdaptiveFilterControls(
+            AdaptiveFilterControls::SecCheckbox | AdaptiveFilterControls::SecBounds,
+            /*withHeader=*/false, /*compact=*/true);
+        m_adaptivePresets = new AdaptiveFilterControls(
+            AdaptiveFilterControls::SecPresets, /*withHeader=*/false, /*compact=*/true);
+        cols->addWidget(m_adaptive, 2);          // 40% — line up with the columns above
+        cols->addWidget(m_adaptivePresets, 3);   // 60%
+        blockV->addLayout(cols);
+
+        m_adaptiveBlock->setVisible(false);
+        root->addWidget(m_adaptiveBlock);
+    }
 
     // Tooltips
     m_lockBtn->setToolTip("Locks the VFO frequency to prevent accidental tuning.");
@@ -2265,8 +2294,10 @@ void RxApplet::connectSlice(SliceModel* s)
 
     // DSP toggles removed — use VFO DSP tab or spectrum overlay
 
-    // Adaptive RX filter — bind the reusable control group to this slice.
-    if (m_adaptive) m_adaptive->setSlice(s);
+    // Adaptive RX filter — bind both control groups (left bounds + right presets)
+    // to this slice; they stay in sync through the model.
+    if (m_adaptive)        m_adaptive->setSlice(s);
+    if (m_adaptivePresets) m_adaptivePresets->setSlice(s);
 
     // RIT
     {
@@ -2358,7 +2389,8 @@ void RxApplet::connectSlice(SliceModel* s)
 void RxApplet::disconnectSlice(SliceModel* s)
 {
     s->disconnect(this);
-    if (m_adaptive) m_adaptive->setSlice(nullptr);  // drops its own slice signals
+    if (m_adaptive)        m_adaptive->setSlice(nullptr);  // drop their own slice signals
+    if (m_adaptivePresets) m_adaptivePresets->setSlice(nullptr);
     m_savedSquelchOn = false;
 }
 
@@ -2592,8 +2624,8 @@ void RxApplet::updateModeSettings(const QString& mode)
     m_ritContainer->setVisible(!isFM);
     m_xitContainer->setVisible(!isFM);
 
-    // Adaptive RX filter is SSB-only.
-    if (m_adaptive) m_adaptive->setVisible(mode == "USB" || mode == "LSB");
+    // Adaptive RX filter is SSB-only — show/hide the whole self-contained block.
+    if (m_adaptiveBlock) m_adaptiveBlock->setVisible(mode == "USB" || mode == "LSB");
 
     // QSK visibility — only meaningful in CW mode
     m_qskBtn->setVisible(mode == "CW");
