@@ -563,7 +563,10 @@ VfoWidget::~VfoWidget()
 void VfoWidget::buildUI()
 {
     auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(6, 2, 6, 0);
+    // Bottom margin (was 0) so the last row of any open tab/menu isn't flush
+    // against the flag's bottom edge — the painted rounded background is inset by
+    // 1px with rounded corners, so flush content spills a few px outside it.
+    root->setContentsMargins(6, 2, 6, 4);
     root->setSpacing(2);
 
     // ── Header row: ANT1(rx) ANT1(tx) 3.8K  SPLIT TX ──────────────────────

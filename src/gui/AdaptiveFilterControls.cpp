@@ -32,10 +32,9 @@ AdaptiveFilterControls::AdaptiveFilterControls(int sections, bool withHeader,
                                                  // the applet's mode/SQL controls
 
     auto* av = new QVBoxLayout(this);
-    // Small bottom margin so the group isn't flush against the flag's edge
-    // (matches the S-meter/SmartMTR menu). Harmless in the applet, where a
-    // stretch sits below this widget.
-    av->setContentsMargins(0, compact ? 0 : 2, 0, 6);
+    // No bottom margin: the flag's root layout provides the bottom spacing, and in
+    // the applet a stretch sits below this widget.
+    av->setContentsMargins(0, 2, 0, 0);
     av->setSpacing(compact ? 2 : 3);
 
     if (withHeader) {
@@ -55,17 +54,22 @@ AdaptiveFilterControls::AdaptiveFilterControls(int sections, bool withHeader,
     QVBoxLayout* leftTarget  = av;
     QVBoxLayout* rightTarget = av;
     if (twoColumn) {
-        auto* cols = new QHBoxLayout;
+        // Wrap the two columns in a real widget (added with addWidget, not
+        // addLayout) so the group's height propagates reliably to the host — a
+        // bare nested HBox-of-VBoxes under-reported its height, leaving the flag
+        // too short and the controls spilling below its painted background.
+        auto* colsWidget = new QWidget;
+        colsWidget->setAttribute(Qt::WA_TranslucentBackground);
+        auto* cols = new QHBoxLayout(colsWidget);
         cols->setContentsMargins(0, 0, 0, 0);
         cols->setSpacing(8);
-        cols->setAlignment(Qt::AlignTop);
         leftTarget  = new QVBoxLayout; leftTarget->setContentsMargins(0, 0, 0, 0);
         leftTarget->setSpacing(av->spacing());
         rightTarget = new QVBoxLayout; rightTarget->setContentsMargins(0, 0, 0, 0);
         rightTarget->setSpacing(av->spacing());
         cols->addLayout(leftTarget, 2);
         cols->addLayout(rightTarget, 3);
-        av->addLayout(cols);
+        av->addWidget(colsWidget);
     }
 
     // Checkbox — "Adaptive RX filter".
@@ -143,6 +147,11 @@ AdaptiveFilterControls::AdaptiveFilterControls(int sections, bool withHeader,
         std::tie(m_splatterRow, m_splatter) = makeRow(rightTarget, tr("Splat"), tr("Adaptive splatter rejection"));
         for (const QString& o : {tr("Tight"), tr("Normal"), tr("Wide")}) m_splatter->addItem(o);
     }
+
+    // Top-pack each column (the shorter one absorbs the slack at the bottom) so
+    // the two sub-columns align at the top.
+    if (twoColumn && leftTarget != av)  leftTarget->addStretch(1);
+    if (twoColumn && rightTarget != av) rightTarget->addStretch(1);
 
     // ── User-action handlers (act on the currently bound slice) ─────────────
     // Cross-instance updates set controls under QSignalBlocker, so these never
