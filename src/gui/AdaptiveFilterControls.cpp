@@ -87,6 +87,9 @@ AdaptiveFilterControls::AdaptiveFilterControls(int sections, bool withHeader,
         m_chk->setAccessibleName(tr("Adaptive RX filter"));
         m_chk->setAccessibleDescription(
             tr("Automatically fit the SSB RX passband to the received signal width"));
+        // Match a combo row's height so the two columns align row-for-row
+        // (checkbox|SNR, Lo cut|Speed, Hi cut|Splat).
+        if (comboFixedH > 0) m_chk->setMinimumHeight(comboFixedH);
         leftTarget->addWidget(m_chk);
     }
 
