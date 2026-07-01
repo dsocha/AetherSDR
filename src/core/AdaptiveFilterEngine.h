@@ -5,6 +5,8 @@
 #include <QString>
 #include <QVector>
 
+#include <climits>                 // INT_MIN (SliceState sentinels)
+
 #include "core/OccupiedRegion.h"   // OccupiedRegion + measureOccupiedRegion()
 
 namespace AetherSDR {
