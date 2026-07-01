@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <functional>
 #include <QHash>
 #include <QWidget>
 #include <QPushButton>
@@ -12,6 +13,8 @@
 #include <QElapsedTimer>
 #include <QTimer>
 #include <QLabel>
+
+#include "DssRenderer.h"
 
 class QVariantAnimation;
 class QSoundEffect;
@@ -56,6 +59,13 @@ const WfGradientStop* wfSchemeStops(WfColorScheme scheme, int& count);
 
 // Returns the display name for a color scheme.
 const char* wfSchemeName(WfColorScheme scheme);
+
+// Spectrum render mode for the panadapter surface.
+enum class SpectrumRenderMode : int {
+    Mode2D = 0,    // FFT trace + scrolling waterfall (classic)
+    Mode3D,        // 3DSS perspective stacked-trace surface
+    Count          // sentinel
+};
 
 // Panadapter / spectrum display widget.
 //
@@ -304,6 +314,7 @@ public:
     bool showCursorFreq() const { return m_showCursorFreq; }
     void setShowFpsMeters(bool on);
     bool showFpsMeters() const { return m_showFpsMeters; }
+    void setFpsMeterSyncStatsProvider(std::function<QString()> provider);
     void setShowTuneGuides(bool on);
     bool showTuneGuides() const { return m_showTuneGuides; }
     void setExtendedFrequencyLine(bool on);
@@ -368,6 +379,19 @@ public:
     void setWfAutoBlackRadioSide(bool radioSide);
     void setWfLineDuration(int ms);
     void setWfColorScheme(int scheme);
+    // Spectrum render mode: 2D (FFT trace + waterfall) or 3D (3DSS stacked
+    // perspective trace surface). Persisted per-panadapter.
+    void setSpectrumRenderMode(int mode);
+    int  spectrumRenderMode() const { return static_cast<int>(m_spectrumRenderMode); }
+    // 3DSS floor depth: how far below the measured noise floor to surface (dB),
+    // lifting the floor carpet into view. Persisted per-panadapter.
+    void setDssFloorDepth(int dB);
+    int  dssFloorDepth() const { return static_cast<int>(std::lround(-m_dssFloorOffsetDb)); }
+    // 3DSS colour floor (0-100): how far down the strength range the colormap
+    // reaches. Higher lifts colour toward the noise floor; lower keeps colour on
+    // strong signals only (gamma-shapes the palette lookup). Persisted per-pan.
+    void setDssGain(int pct);
+    int  dssGain() const { return m_dssGain; }
     void resetWfTimeScale();
     int   wfColorGain() const          { return m_wfColorGain; }
     int   wfBlackLevel() const         { return m_wfBlackLevel; }
@@ -391,6 +415,10 @@ public:
         bool   isTxSlice{false};
         bool   isActive{false};
         int    splitPartnerId{-1};  // slice ID of split partner, -1 if not in split
+        bool   diversity{false};
+        bool   diversityParent{false};
+        bool   diversityChild{false};
+        int    diversityIndex{-1};
         QString mode;               // "RTTY", "USB", etc.
         int    rttyMark{2125};      // RTTY mark audio offset (Hz)
         int    rttyShift{170};      // RTTY shift (Hz)
@@ -414,7 +442,11 @@ public:
                          bool tx, bool active, const QString& mode = {},
                          int rttyMark = 2125, int rttyShift = 170,
                          bool ritOn = false, int ritFreq = 0,
-                         bool xitOn = false, int xitFreq = 0);
+                         bool xitOn = false, int xitFreq = 0,
+                         bool diversity = false,
+                         bool diversityParent = false,
+                         bool diversityChild = false,
+                         int diversityIndex = -1);
     // Update just the frequency on an existing overlay (for optimistic scroll-to-tune)
     void setSliceOverlayFreq(int sliceId, double freqMhz);
     // Update the per-client letter on an existing overlay; safe to call
@@ -648,6 +680,7 @@ private:
     void installVfoCursorEventFilter(VfoWidget* widget);
     void setVfoCursorOverride(Qt::CursorShape shape);
     void clearVfoCursorOverride();
+    void applyActiveVfoZOrder();
 #ifdef AETHER_GPU_SPECTRUM
     void repositionVfoFlags(const QRect& specRect);  // #3617 — shared flag positioner
 #endif
@@ -657,6 +690,7 @@ private:
     void drawWaterfall(QPainter& p, const QRect& r);
     void createFpsMeterLabels();
     void updateFpsMeterLabels();
+    void updateFpsMeterSyncStatsLabel(bool force = false);
     void positionFpsMeterLabels();
     void positionZoomButtons();
     void drawFreqScale(QPainter& p, const QRect& r);
@@ -808,6 +842,26 @@ private:
     QRgb dbmToRgb(float dbm) const;
     QRgb kiwiSdrLevelToRgb(float level) const;
     QRgb intensityToRgb(float intensity) const;  // for native waterfall tiles
+    // 3DSS surface colour for a normalised strength s in [0,1] (0 = noise floor,
+    // 1 = ref). The full colormap gradient, gamma-shaped by the "3D Gain"
+    // control. Shared by the GPU LUT bake and the CPU fallback so both paths
+    // colour identically (deliberately NOT dbmToRgb(), whose waterfall
+    // black-level window clipped the lower range to black).
+    QRgb dssStrengthToRgb(float s) const;
+
+    // 3DSS — rebuild/return the cached perspective surface for the given pixel
+    // size (scaleStripPx = transparent frequency-scale strip at the bottom).
+    const QImage& buildDssImage(const QSize& px, int scaleStripPx);
+    // Token folding the dbmToRgb() palette inputs so the 3DSS cache rebuilds
+    // when the colour mapping (scheme/gain/floor) changes.
+    quint64 dssPaletteToken() const;
+    // Unified noise-floor anchor (dBm, quantised) for the 3D surface — uses the
+    // measured floor for the active source (Flex or KiwiSDR), offset by the
+    // user's 3D Floor depth, so the floor sits at the baseline consistently.
+    float dssFloorDbm() const;
+    // dB span shown above the noise floor — Ref-derived, clamped so the wide
+    // Flex window can't flatten signals.
+    float dssSpanDb() const;
 
     // Pixel x coordinate for a given frequency in MHz (0 = left edge).
     int mhzToX(double mhz) const;
@@ -966,6 +1020,26 @@ private:
     // legacy look); true = the radio's per-tile auto-black level.
     bool  m_wfAutoBlackRadioSide{false};
     WfColorScheme m_wfColorScheme{WfColorScheme::Default};
+
+    // 3DSS — perspective stacked-trace render mode. m_dss owns the rolling
+    // history + cached surface image; consumed by both the CPU and GPU paths.
+    SpectrumRenderMode m_spectrumRenderMode{SpectrumRenderMode::Mode2D};
+    // GUI-thread only: pushRow() (updateSpectrum / updateKiwiSdrWaterfallRow) and
+    // the renderGpuFrame/paint reads all run on the GUI thread, so m_dss needs no
+    // lock. Do NOT call pushRow() from a worker/audio thread without adding one.
+    DssRenderer   m_dss;
+    // 3DSS height anchor: the measured noise floor maps this many dB below the
+    // trace baseline. A few dB negative lifts the noisy floor carpet (with its
+    // own colour) up off the baseline so you see floor -> peak, not just crests.
+    float m_dssFloorOffsetDb{-6.0f};
+    int   m_dssGain{70};   // 3DSS colour floor 0-100 (gamma of palette lookup)
+    // Consumed by BOTH the GPU mesh and the CPU fallback surface, so these stay
+    // outside the AETHER_GPU_SPECTRUM block below — the CPU paint path needs them
+    // even when GPU spectrum rendering is disabled (older Qt / -DAETHER_GPU_SPECTRUM=OFF).
+    float m_dssZCurve{0.70f};               // <1 expands the floor band (more floor)
+    static constexpr int kDssMaxW = 1024;   // 3DSS surface texture/image caps
+    static constexpr int kDssMaxH = 512;
+
     float m_autoBlackThresh{145.0f}; // client-side auto-black: tracked noise floor
     // Radio's per-tile auto-black level (raw uint16). Preferred over the client
     // estimate when non-zero; matches FlexLib's auto-level pipeline.
@@ -1077,6 +1151,7 @@ private:
     QTimer* m_vfoDragEdgePanTimer{nullptr};
     int  m_vfoDragLastX{0};                 // last cursor X during VFO drag (px)
     int  m_vfoDragEdgeHoldTicks{0};         // ticks held in edge zone (ramp)
+    qint64 m_vfoDragPanEchoHoldUntilMs{0};  // ignore stale center echoes briefly after drag
     bool m_vfoDragEdgePanDisabled{false};   // AETHER_NO_DRAG_EDGEPAN=1 escape hatch
     // Velocity knobs, env-tunable so the feel can be swept WITHOUT rebuilding:
     //   AETHER_DRAG_EDGEPAN_VMAX     — top speed, % of span width per second
@@ -1232,6 +1307,9 @@ private:
     double m_kiwiSdrWaterfallFps{0.0};
     QLabel* m_panFpsMeterLabel{nullptr};
     QLabel* m_wfFpsMeterLabel{nullptr};
+    QLabel* m_syncFpsMeterLabel{nullptr};
+    QElapsedTimer m_syncFpsMeterUpdateTimer;
+    std::function<QString()> m_fpsMeterSyncStatsProvider;
     qint64 m_lastMouseMoveNs{0};
 
     // ── TNF markers ────────────────────────────────────────────────────
@@ -1329,6 +1407,42 @@ private:
     QRhiTexture* m_bgGpuTex{nullptr};
     QImage m_overlayBg;
     bool m_overlayBgNeedsUpload{true};
+
+    // 3DSS surface layer — the cached 3D image uploaded as a texture and drawn
+    // through the overlay pipeline (overlay.frag, premultiplied alpha) as a
+    // full-screen quad, above the 2D layers and below the static overlay. Reuses
+    // m_ovPipeline / m_ovVbo / m_ovSampler; only the texture + SRB are dedicated.
+    QRhiShaderResourceBindings* m_dssSrb{nullptr};
+    QRhiTexture* m_dssGpuTex{nullptr};
+    bool m_dssTexNeedsUpload{true};
+    quint64 m_dssLastUploadedGen{~0ull};  // DssRenderer generation last uploaded
+    int m_dssTexW{0};
+    int m_dssTexH{0};
+
+    // 3DSS GPU height-map mesh (preferred path). The DssRenderer ring store
+    // feeds a ring-buffered R16F height texture; a static perspective grid samples
+    // it in dss_mesh.vert. Geometry never rebuilds, so pan/zoom are free. Falls
+    // back to the cached-image quad above when the pipeline can't be created.
+    QRhiGraphicsPipeline* m_dssMeshFillPipeline{nullptr};  // TriangleStrip, opaque
+    QRhiGraphicsPipeline* m_dssMeshLinePipeline{nullptr};  // LineStrip, alpha (outline)
+    QRhiShaderResourceBindings* m_dssMeshSrb{nullptr};
+    QRhiBuffer* m_dssMeshVbo{nullptr};       // curtain verts (ridge+floor), static
+    QRhiBuffer* m_dssMeshLineVbo{nullptr};   // ridge-only verts (outline), static
+    QRhiBuffer* m_dssMeshUbo{nullptr};       // dynamic uniforms
+    // std140 UBO float count — must match dss_mesh.{vert,frag}'s U block AND the
+    // ubo[] writer in renderGpuFrame(). 8 scalars + texCols + 3 pad + vec4 bgFill.
+    static constexpr int kDssMeshUboFloats = 16;
+    QRhiTexture* m_dssHeightTex{nullptr};    // R16F ring heightmap (cols x rows)
+    QRhiTexture* m_dssPaletteTex{nullptr};   // 256x1 RGBA8 floor->peak LUT
+    QRhiSampler* m_dssHeightSampler{nullptr};
+    QRhiSampler* m_dssPaletteSampler{nullptr};
+    bool m_dssMeshReady{false};
+    int  m_dssMeshHeadUploaded{-1};          // ring head last uploaded to heightTex
+    quint64 m_dssLutToken{~0ull};            // token of the palette LUT last baked
+    QByteArray m_dssRowScratch;              // reused qfloat16 row buffer (mesh upload)
+
+    void initDssMeshPipeline();
+    void uploadDssPaletteLut(QRhiResourceUpdateBatch* batch, float floorDbm, float rangeDb);
 
     void initWaterfallPipeline();
     void initOverlayPipeline();

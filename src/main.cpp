@@ -427,9 +427,22 @@ int main(int argc, char* argv[])
             automation = std::make_unique<AetherSDR::AutomationServer>();
             automation->setRadioModel(&window.radioModel());  // for the get() verb
             automation->setAudioEngine(window.audioEngine());
+            automation->setQsoRecorder(window.qsoRecorder());  // for the record() verb
             automation->setConnectionDialogHost(&window);
             automation->setConnectionPanel(
                 window.findChild<AetherSDR::ConnectionPanel*>(QStringLiteral("connectionPanel")));
+            automation->setSliceReceiveSourceHandler(
+                [&window](const QString& arg) {
+                    return window.automationSetSliceReceiveSource(arg);
+                });
+            automation->setReceiveSyncSnapshotHandler(
+                [&window]() {
+                    return window.automationReceiveSyncSnapshot();
+                });
+            automation->setKiwiSdrSnapshotHandler(
+                [&window]() {
+                    return window.automationKiwiSdrSnapshot();
+                });
             if (!automation->start(sockName))
                 automation.reset();
         }

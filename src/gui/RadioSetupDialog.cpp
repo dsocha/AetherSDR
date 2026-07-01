@@ -122,6 +122,119 @@ static const QString kKiwiIconButtonStyle =
 static constexpr int kInfoLeftLabelWidth = 112;
 static constexpr int kInfoRightLabelWidth = 160;
 
+static QString kiwiSetupApiPolicyText(KiwiSdrProtocol::ApiPolicy policy)
+{
+    switch (policy) {
+    case KiwiSdrProtocol::ApiPolicy::Disabled:
+        return QStringLiteral("API disabled");
+    case KiwiSdrProtocol::ApiPolicy::Limited:
+        return QStringLiteral("API limited");
+    case KiwiSdrProtocol::ApiPolicy::Open:
+        return QStringLiteral("API open");
+    case KiwiSdrProtocol::ApiPolicy::Unknown:
+        break;
+    }
+    return QStringLiteral("API unknown");
+}
+
+static QString kiwiSetupMetadataSummary(const KiwiSdrManager* manager,
+                                        const QString& id)
+{
+    if (!manager || id.isEmpty()) {
+        return QString();
+    }
+
+    const KiwiSdrProtocol::ReceiverMetadata metadata =
+        manager->receiverMetadata(id);
+    const KiwiSdrProtocol::ProtocolState protocol =
+        manager->protocolState(id);
+    QStringList parts;
+    if (!metadata.serverVersion.isEmpty()) {
+        parts << QStringLiteral("v%1").arg(metadata.serverVersion);
+    }
+    if (metadata.hasUsers && metadata.hasUsersMax) {
+        parts << QStringLiteral("%1/%2 users")
+                     .arg(metadata.users)
+                     .arg(metadata.usersMax);
+    } else if (metadata.hasUsers) {
+        parts << QStringLiteral("%1 users").arg(metadata.users);
+    }
+    if (metadata.hasBusy && metadata.busy) {
+        parts << QStringLiteral("busy");
+    }
+    if (metadata.hasCampStatus
+        && metadata.campStatus != KiwiSdrProtocol::CampStatus::Unknown) {
+        switch (metadata.campStatus) {
+        case KiwiSdrProtocol::CampStatus::Offered:
+            parts << QStringLiteral("monitor offered");
+            break;
+        case KiwiSdrProtocol::CampStatus::Queued:
+            if (metadata.hasCampQueuePosition
+                && metadata.hasCampQueueWaiters) {
+                parts << QStringLiteral("queue %1/%2")
+                             .arg(metadata.campQueuePosition)
+                             .arg(metadata.campQueueWaiters);
+            } else {
+                parts << QStringLiteral("queued");
+            }
+            break;
+        case KiwiSdrProtocol::CampStatus::Accepted:
+            parts << (metadata.hasCampReceiverChannel
+                          ? QStringLiteral("camping RX%1")
+                                .arg(metadata.campReceiverChannel)
+                          : QStringLiteral("camping"));
+            break;
+        case KiwiSdrProtocol::CampStatus::Rejected:
+            parts << QStringLiteral("camp rejected");
+            break;
+        case KiwiSdrProtocol::CampStatus::AudioStopped:
+            parts << QStringLiteral("camp audio stopped");
+            break;
+        case KiwiSdrProtocol::CampStatus::Disconnected:
+            parts << QStringLiteral("camp disconnected");
+            break;
+        case KiwiSdrProtocol::CampStatus::Unknown:
+            break;
+        }
+    }
+    if (metadata.hasExtApi) {
+        parts << QStringLiteral("%1 (%2)")
+                     .arg(kiwiSetupApiPolicyText(metadata.apiPolicy))
+                     .arg(metadata.extApi);
+    }
+    if (metadata.hasGpsGood) {
+        parts << (metadata.gpsGood ? QStringLiteral("GPS good")
+                                   : QStringLiteral("GPS not good"));
+    }
+    if (metadata.hasAdcClipping && metadata.adcClipping) {
+        parts << QStringLiteral("ADC clipping");
+    }
+    if (metadata.hasCoverageCenter && metadata.hasCoverageBandwidth) {
+        const double lowMhz =
+            metadata.coverageCenterMhz - metadata.coverageBandwidthMhz * 0.5;
+        const double highMhz =
+            metadata.coverageCenterMhz + metadata.coverageBandwidthMhz * 0.5;
+        parts << QStringLiteral("%1-%2 MHz")
+                     .arg(lowMhz, 0, 'f', 3)
+                     .arg(highMhz, 0, 'f', 3);
+    }
+    if (protocol.sound.observed
+        && protocol.sound.lastObservedLayout
+            != KiwiSdrProtocol::FrameLayout::Unknown) {
+        parts << QStringLiteral("SND %1")
+                     .arg(KiwiSdrProtocol::frameLayoutName(
+                         protocol.sound.lastObservedLayout));
+    }
+    if (protocol.waterfall.observed
+        && protocol.waterfall.lastObservedLayout
+            != KiwiSdrProtocol::FrameLayout::Unknown) {
+        parts << QStringLiteral("W/F %1")
+                     .arg(KiwiSdrProtocol::frameLayoutName(
+                         protocol.waterfall.lastObservedLayout));
+    }
+    return parts.join(QStringLiteral(" · "));
+}
+
 // Wrap a tab page in a vertical QScrollArea so tabs whose stacked groups exceed
 // the dialog's visible height (Themes, Audio, Filters, Peripherals on small or
 // high-DPI displays) get a vertical scrollbar instead of forcing the dialog
@@ -2414,7 +2527,7 @@ QWidget* RadioSetupDialog::buildAudioTab()
         auto* bufLabel = new QLabel("Audio Buffer:");
         bufLabel->setStyleSheet(kLabelStyle);
         bufLabel->setFixedWidth(90);
-        int bufMs = AppSettings::instance().value("AudioBufferMs", "200").toInt();
+        int bufMs = AppSettings::instance().value("AudioBufferMs", "100").toInt();
         auto* bufEdit = new QLineEdit(QString::number(bufMs));
         bufEdit->setStyleSheet(kEditStyle);
         bufEdit->setFixedWidth(50);
@@ -2471,7 +2584,7 @@ QWidget* RadioSetupDialog::buildAudioTab()
         clientSideBtn->setCheckable(true);
         clientSideBtn->setStyleSheet(modeBtnStyle);
 
-        bool clientSide = settings.value("RecordingMode", "Radio").toString() == "Client";
+        bool clientSide = settings.value("RecordingMode", "Client").toString() == "Client";
         radioSideBtn->setChecked(!clientSide);
         clientSideBtn->setChecked(clientSide);
 
@@ -2564,121 +2677,6 @@ QWidget* RadioSetupDialog::buildAudioTab()
 
         vbox->addWidget(recGroup);
     }
-
-    // ── NVIDIA BNR (GPU Noise Removal) ──────────────────────────────────
-#ifdef HAVE_BNR
-    {
-        auto* bnrGroup = new QGroupBox("NVIDIA BNR (GPU Noise Removal)");
-        bnrGroup->setStyleSheet(kGroupStyle);
-        auto* bnrLayout = new QVBoxLayout(bnrGroup);
-
-        // Autostart checkbox
-        auto* autoRow = new QHBoxLayout;
-        auto* autoStart = new QPushButton("Autostart Container");
-        autoStart->setCheckable(true);
-        autoStart->setChecked(
-            AppSettings::instance().value("BnrAutostart", "False").toString() == "True");
-        AetherSDR::ThemeManager::instance().applyStyleSheet(autoStart, "QPushButton { background: {{color.background.1}}; border: 1px solid {{color.background.2}}; "
-            "border-radius: 3px; color: {{color.text.primary}}; font-size: 11px; padding: 2px 10px; }"
-            "QPushButton:checked { background: #00607a; color: {{color.text.primary}}; border-color: {{color.accent}}; }");
-        autoRow->addWidget(autoStart);
-
-        // Container name
-        auto* nameLbl = new QLabel("Container:");
-        nameLbl->setStyleSheet(kLabelStyle);
-        auto* nameEdit = new QLineEdit(
-            AppSettings::instance().value("BnrContainerName", "maxine-bnr").toString());
-        nameEdit->setFixedWidth(120);
-        AetherSDR::ThemeManager::instance().applyStyleSheet(nameEdit, "QLineEdit { background: {{color.background.1}}; border: 1px solid {{color.background.2}}; "
-            "border-radius: 3px; color: {{color.text.primary}}; font-size: 11px; padding: 2px 4px; }");
-        autoRow->addWidget(nameLbl);
-        autoRow->addWidget(nameEdit);
-        autoRow->addStretch(1);
-        bnrLayout->addLayout(autoRow);
-
-        // Status row
-        auto* statusRow = new QHBoxLayout;
-        auto* statusDot = new QLabel("\u2B24");  // filled circle
-        statusDot->setStyleSheet("QLabel { color: #404040; font-size: 10px; }");
-        auto* statusLbl = new QLabel("Unknown");
-        statusLbl->setStyleSheet(kLabelStyle);
-        statusRow->addWidget(statusDot);
-        statusRow->addWidget(statusLbl);
-
-        auto* checkBtn = new QPushButton("Check Status");
-        checkBtn->setFixedWidth(90);
-        AetherSDR::ThemeManager::instance().applyStyleSheet(checkBtn, "QPushButton { background: {{color.background.1}}; border: 1px solid {{color.background.2}}; "
-            "border-radius: 3px; color: {{color.text.primary}}; font-size: 11px; padding: 2px; }"
-            "QPushButton:hover { background: {{color.background.1}}; }");
-        statusRow->addWidget(checkBtn);
-
-        auto* startBtn = new QPushButton("Start");
-        startBtn->setFixedWidth(50);
-        startBtn->setStyleSheet(checkBtn->styleSheet());
-        statusRow->addWidget(startBtn);
-
-        auto* stopBtn = new QPushButton("Stop");
-        stopBtn->setFixedWidth(50);
-        stopBtn->setStyleSheet(checkBtn->styleSheet());
-        statusRow->addWidget(stopBtn);
-        statusRow->addStretch(1);
-        bnrLayout->addLayout(statusRow);
-
-        // Check container status
-        auto checkStatus = [statusDot, statusLbl, nameEdit]() {
-            QProcess proc;
-            proc.start("docker", {"inspect", "-f", "{{.State.Status}}", nameEdit->text()});
-            proc.waitForFinished(3000);
-            QString out = proc.readAllStandardOutput().trimmed();
-            QString err = proc.readAllStandardError().trimmed();
-            qDebug() << "BNR checkStatus:" << out << err << "exit:" << proc.exitCode();
-            if (out == "running") {
-                statusDot->setStyleSheet("QLabel { color: #00d860; font-size: 10px; }");
-                statusLbl->setText("Running");
-            } else if (!out.isEmpty()) {
-                statusDot->setStyleSheet("QLabel { color: #d8a000; font-size: 10px; }");
-                statusLbl->setText("Stopped (" + out + ")");
-            } else {
-                statusDot->setStyleSheet("QLabel { color: #d83030; font-size: 10px; }");
-                statusLbl->setText("Not found");
-            }
-        };
-
-        connect(checkBtn, &QPushButton::clicked, this, checkStatus);
-
-        connect(startBtn, &QPushButton::clicked, this,
-                [nameEdit, statusLbl, checkStatus]() {
-            auto* proc = new QProcess;
-            connect(proc, &QProcess::finished, statusLbl, [proc, checkStatus]() {
-                proc->deleteLater();
-                checkStatus();
-            });
-            proc->start("docker", {"start", nameEdit->text()});
-        });
-
-        connect(stopBtn, &QPushButton::clicked, this,
-                [nameEdit, statusLbl, checkStatus]() {
-            auto* proc = new QProcess;
-            connect(proc, &QProcess::finished, statusLbl, [proc, checkStatus]() {
-                proc->deleteLater();
-                checkStatus();
-            });
-            proc->start("docker", {"stop", nameEdit->text()});
-        });
-
-        connect(autoStart, &QPushButton::toggled, this, [](bool on) {
-            AppSettings::instance().setValue("BnrAutostart", on ? "True" : "False");
-        });
-        connect(nameEdit, &QLineEdit::textChanged, this, [](const QString& name) {
-            AppSettings::instance().setValue("BnrContainerName", name);
-        });
-
-        vbox->addWidget(bnrGroup);
-
-        // Check on dialog open (context object ensures timer is cancelled if dialog closes)
-        QTimer::singleShot(0, statusLbl, checkStatus);
-    }
-#endif
 
     vbox->addStretch(1);
     return page;
@@ -3189,6 +3187,23 @@ QWidget* RadioSetupDialog::buildAntennaNamesTab()
 
     auto refreshKiwi = std::make_shared<std::function<void()>>();
     if (m_kiwiSdrManager && kiwiRowsLayout) {
+        auto* kiwiTelemetryRefreshTimer = new QTimer(this);
+        kiwiTelemetryRefreshTimer->setSingleShot(true);
+        kiwiTelemetryRefreshTimer->setInterval(150);
+        connect(kiwiTelemetryRefreshTimer, &QTimer::timeout,
+                this, [refreshKiwi] {
+            if (*refreshKiwi) {
+                (*refreshKiwi)();
+            }
+        });
+
+        auto refreshKiwiNow = [refreshKiwi, kiwiTelemetryRefreshTimer] {
+            kiwiTelemetryRefreshTimer->stop();
+            if (*refreshKiwi) {
+                (*refreshKiwi)();
+            }
+        };
+
         auto stateText = [this](const QString& id) {
             const KiwiSdrClient::State state = m_kiwiSdrManager->state(id);
             QString base;
@@ -3202,6 +3217,18 @@ QWidget* RadioSetupDialog::buildAntennaNamesTab()
             case KiwiSdrClient::State::Connected:
                 base = QStringLiteral("Connected");
                 break;
+            case KiwiSdrClient::State::Busy:
+                base = QStringLiteral("Busy");
+                break;
+            case KiwiSdrClient::State::Waiting:
+                base = QStringLiteral("Waiting");
+                break;
+            case KiwiSdrClient::State::Camping:
+                base = QStringLiteral("Monitoring");
+                break;
+            case KiwiSdrClient::State::CampDisconnected:
+                base = QStringLiteral("Camp ended");
+                break;
             case KiwiSdrClient::State::Error:
                 base = QStringLiteral("Error");
                 break;
@@ -3210,7 +3237,16 @@ QWidget* RadioSetupDialog::buildAntennaNamesTab()
             if (!detail.isEmpty()
                 && state != KiwiSdrClient::State::Connected
                 && state != KiwiSdrClient::State::Connecting) {
-                return QStringLiteral("%1\n%2").arg(base, detail);
+                base = QStringLiteral("%1\n%2").arg(base, detail);
+            }
+            const QString metadata = kiwiSetupMetadataSummary(
+                m_kiwiSdrManager, id);
+            if (!metadata.isEmpty()) {
+                base = QStringLiteral("%1\n%2")
+                           .arg(base.isEmpty()
+                                    ? QStringLiteral("Disconnected")
+                                    : base,
+                                metadata);
             }
             return base.isEmpty() ? QStringLiteral("Disconnected") : base;
         };
@@ -3266,6 +3302,7 @@ QWidget* RadioSetupDialog::buildAntennaNamesTab()
 
                 auto* status = new QLabel(stateText(profile.id));
                 status->setAccessibleName("KiwiSDR antenna status");
+                status->setAccessibleDescription(status->text());
                 status->setStyleSheet(
                     "QLabel { color: #c8d8e8; font-size: 12px; padding-left: 6px; }");
                 status->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
@@ -3288,14 +3325,17 @@ QWidget* RadioSetupDialog::buildAntennaNamesTab()
                     "QCheckBox { color: #c8d8e8; font-size: 12px; spacing: 4px; }");
                 rowLayout->addWidget(autoCheck, 1, 1, Qt::AlignCenter);
 
-                const bool connected =
-                    m_kiwiSdrManager->state(profile.id)
-                    == KiwiSdrClient::State::Connected;
+                const KiwiSdrClient::State kiwiState =
+                    m_kiwiSdrManager->state(profile.id);
+                const bool activeSession =
+                    kiwiState == KiwiSdrClient::State::Connecting
+                    || kiwiState == KiwiSdrClient::State::Waiting
+                    || KiwiSdrClient::stateHasReceiveAudio(kiwiState);
                 auto* connectButton =
-                    new QPushButton(connected ? "Disconnect" : "Connect");
+                    new QPushButton(activeSession ? "Disconnect" : "Connect");
                 connectButton->setAccessibleName(
-                    connected ? "Disconnect KiwiSDR antenna"
-                              : "Connect KiwiSDR antenna");
+                    activeSession ? "Disconnect KiwiSDR antenna"
+                                  : "Connect KiwiSDR antenna");
                 styleKiwiButton(connectButton);
                 rowLayout->addWidget(connectButton, 1, 2);
 
@@ -3343,8 +3383,8 @@ QWidget* RadioSetupDialog::buildAntennaNamesTab()
                 connect(autoCheck, &QCheckBox::toggled,
                         this, [updateProfile](bool) { updateProfile(); });
                 connect(connectButton, &QPushButton::clicked,
-                        this, [this, profile, connected] {
-                    if (connected) {
+                        this, [this, profile, activeSession] {
+                    if (activeSession) {
                         m_kiwiSdrManager->disconnectProfile(profile.id);
                     } else {
                         m_kiwiSdrManager->connectProfile(profile.id);
@@ -3447,16 +3487,18 @@ QWidget* RadioSetupDialog::buildAntennaNamesTab()
         };
 
         connect(m_kiwiSdrManager, &KiwiSdrManager::profilesChanged,
-                this, [refreshKiwi] {
-            if (*refreshKiwi) {
-                (*refreshKiwi)();
-            }
-        });
+                this, refreshKiwiNow);
         connect(m_kiwiSdrManager, &KiwiSdrManager::profileStateChanged,
-                this, [refreshKiwi](const QString&, KiwiSdrClient::State,
-                                    const QString&) {
-            if (*refreshKiwi) {
-                (*refreshKiwi)();
+                this, [refreshKiwiNow](const QString&,
+                                        KiwiSdrClient::State,
+                                        const QString&) {
+            refreshKiwiNow();
+        });
+        connect(m_kiwiSdrManager, &KiwiSdrManager::profileTelemetryChanged,
+                this, [kiwiTelemetryRefreshTimer](const QString&,
+                                                  const KiwiSdrReceiverTelemetry&) {
+            if (!kiwiTelemetryRefreshTimer->isActive()) {
+                kiwiTelemetryRefreshTimer->start();
             }
         });
     }

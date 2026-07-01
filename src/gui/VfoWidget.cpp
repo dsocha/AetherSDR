@@ -20,9 +20,11 @@
 #include "InteractionSettings.h"
 
 #include <QDateTime>
+#include <QAction>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
+#include <QPointer>
 #include <QStyle>
 #include <QStyleOptionSlider>
 #include <QTimer>
@@ -578,44 +580,56 @@ void VfoWidget::buildUI()
     m_rxAntBtn->setFlat(true);
     m_rxAntBtn->setStyleSheet(kFlatBtn + "QPushButton { color: #4488ff; }");
     connect(m_rxAntBtn, &QPushButton::clicked, this, [this] {
-        if (!m_slice) return;
-        QMenu menu(this);
-        const QStringList options = !m_slice->rxAntennaList().isEmpty()
-            ? m_slice->rxAntennaList()
-            : m_antList;
-        QStringList menuOptions = options;
+        if (!m_slice) {
+            return;
+        }
+        QPointer<SliceModel> slice = m_slice;
+        QStringList menuOptions = rxAntennaOptions();
         if (m_kiwiSdrManager) {
-            menuOptions.append(m_kiwiSdrManager->virtualAntennaTokens());
+            for (const QString& ant : m_kiwiSdrManager->virtualAntennaTokens()) {
+                if (!ant.isEmpty() && !menuOptions.contains(ant)) {
+                    menuOptions.append(ant);
+                }
+            }
+        }
+        if (menuOptions.isEmpty()) {
+            menuOptions << QStringLiteral("ANT1") << QStringLiteral("ANT2");
         }
         const QString activeKiwiProfile =
             m_kiwiSdrManager
-                ? m_kiwiSdrManager->assignedProfileForSlice(m_slice->sliceId())
+                ? m_kiwiSdrManager->assignedProfileForSlice(slice->sliceId())
                 : QString();
+        QMenu* menu = new QMenu(m_rxAntBtn);
+        connect(menu, &QMenu::aboutToHide, menu, &QObject::deleteLater);
         for (const QString& ant : menuOptions) {
-            auto* act = menu.addAction(antennaMenuLabel(ant, menuOptions));
+            auto* act = menu->addAction(antennaMenuLabel(ant, menuOptions));
             act->setData(ant);
             act->setCheckable(true);
             const QString profileId = m_kiwiSdrManager
                 ? m_kiwiSdrManager->profileIdForVirtualAntennaToken(ant)
                 : QString();
             act->setChecked(profileId.isEmpty()
-                ? ant == m_slice->rxAntenna() && activeKiwiProfile.isEmpty()
+                ? ant == slice->rxAntenna() && activeKiwiProfile.isEmpty()
                 : profileId == activeKiwiProfile);
             act->setToolTip(ant);
             act->setStatusTip(ant);
         }
-        if (auto* sel = menu.exec(m_rxAntBtn->mapToGlobal(QPoint(0, m_rxAntBtn->height())))) {
+        connect(menu, &QMenu::triggered, this, [this, slice](QAction* sel) {
+            if (!sel || !slice) {
+                return;
+            }
             const QString token = sel->data().toString();
             const QString profileId = m_kiwiSdrManager
                 ? m_kiwiSdrManager->profileIdForVirtualAntennaToken(token)
                 : QString();
             if (!profileId.isEmpty()) {
-                emit kiwiRxAntennaSelected(m_slice->sliceId(), profileId);
+                emit kiwiRxAntennaSelected(slice->sliceId(), profileId);
             } else {
-                emit flexRxAntennaSelected(m_slice->sliceId());
-                m_slice->setRxAntenna(token);
+                emit flexRxAntennaSelected(slice->sliceId());
+                slice->setRxAntenna(token);
             }
-        }
+        });
+        menu->popup(m_rxAntBtn->mapToGlobal(QPoint(0, m_rxAntBtn->height())));
     });
     hdr->addWidget(m_rxAntBtn);
 
@@ -2954,49 +2968,14 @@ void VfoWidget::setAfGain(int pct)
 void VfoWidget::updatePosition(int vfoX, int specTop, FlagDir dir)
 {
     const int w = width();
-    bool onLeft = true;
-    // Split pairs pass LockLeft/LockRight so the panels stay on their
-    // outward-facing sides even when one is near a pan edge. Without
-    // the lock, the edge-clip flip below would collapse both panels
-    // onto the same side and they would visually overlap (#2663).
-    const bool lockedSide = (dir == LockLeft || dir == LockRight);
-
-    if (dir == ForceLeft || dir == LockLeft) {
-        onLeft = true;
-    } else if (dir == ForceRight || dir == LockRight) {
-        onLeft = false;
-    } else {
-        // Auto: use mode-based default
-        onLeft = !m_slice || defaultFlagOnLeftForMode(m_slice->mode());
-    }
-
-    // 20px dead-band: only flip side when the widget clearly overruns the edge.
-    // Without this, the flip threshold can oscillate frame-to-frame while
-    // m_centerMhz is animating, snapping the VFO panel back and forth.
-    constexpr int kEdgeHysteresis = 20;
-
-    int x;
-    if (onLeft) {
-        x = vfoX - w;
-        // Flip to right only when clearly clipping the left edge.
-        // Split pairs (lockedSide) skip the flip so RX/TX stay opposite.
-        if (!lockedSide && x < -kEdgeHysteresis) {
-            x = vfoX;
-            onLeft = false;
-        }
-    } else {
-        x = vfoX;
-        // Flip to left only when clearly clipping the right edge.
-        // Split pairs (lockedSide) skip the flip so RX/TX stay opposite.
-        const int parentW = parentWidget() ? parentWidget()->width() : INT_MAX;
-        if (!lockedSide && x + w > parentW + kEdgeHysteresis) {
-            x = vfoX - w;
-            onLeft = true;
-        }
-    }
+    const bool defaultOnLeft = !m_slice || defaultFlagOnLeftForMode(m_slice->mode());
+    const int parentW = parentWidget() ? parentWidget()->width() : 0;
+    const FlagPlacement placement = placementForMarker(
+        vfoX, specTop, w, height(), parentW, dir, defaultOnLeft);
+    const bool onLeft = placement.onLeft;
 
     // Skip all moves if position unchanged — prevents repaint cascade on QRhiWidget
-    const QPoint newPos(x, specTop);
+    const QPoint newPos = placement.rect.topLeft();
     if (pos() == newPos && m_lastOnLeft == onLeft)
         return;
     m_lastOnLeft = onLeft;
@@ -3016,11 +2995,11 @@ void VfoWidget::updatePosition(int vfoX, int specTop, FlagDir dir)
         const int gap = 2;
         int btnX;
         if (onLeft)
-            btnX = x - btnSize - gap;  // left of VFO widget
+            btnX = newPos.x() - btnSize - gap;  // left of VFO widget
         else
-            btnX = x + w + gap;        // right of VFO widget
+            btnX = newPos.x() + w + gap;        // right of VFO widget
 
-        int btnY = specTop;
+        int btnY = newPos.y();
         if (!m_collapsed) {
             m_closeSliceBtn->move(btnX, btnY);
             btnY += btnSize + gap;
@@ -3043,12 +3022,12 @@ void VfoWidget::updatePosition(int vfoX, int specTop, FlagDir dir)
         const int freqGap = 2;
         int freqX;
         int freqH = m_collapsedFreqLabel->sizeHint().height();
-        int freqY = specTop + (height() - freqH) / 2;  // vertically centered
+        int freqY = newPos.y() + (height() - freqH) / 2;  // vertically centered
         int freqW = m_collapsedFreqLabel->sizeHint().width();
         if (onLeft) {
-            freqX = x - freqW - freqGap;
+            freqX = newPos.x() - freqW - freqGap;
         } else {
-            freqX = x + w + freqGap;
+            freqX = newPos.x() + w + freqGap;
         }
         m_collapsedFreqLabel->move(freqX, freqY);
     }
@@ -4013,6 +3992,8 @@ void VfoWidget::setSlice(SliceModel* slice)
     connect(m_slice, &SliceModel::txAntennaChanged, this, [this](const QString& ant) {
         m_updatingFromModel = true; updateAntennaButton(m_txAntBtn, ant, true); m_updatingFromModel = false;
     });
+    connect(m_slice, &SliceModel::rxAntennaListChanged,
+            this, [this](const QStringList&) { updateAntennaButtons(); });
     connect(m_slice, &SliceModel::txAntennaListChanged,
             this, [this](const QStringList&) { updateAntennaButtons(); });
     // TX slice — toggle between red (active TX) and grey (clickable to set TX)
@@ -5602,6 +5583,37 @@ QString VfoWidget::antennaMenuLabel(const QString& token,
         return token;
     return m_radioModel->antennaDisplayName(
         token, m_radioModel->antennaAliasNeedsDisambiguation(token, options));
+}
+
+QStringList VfoWidget::rxAntennaOptions() const
+{
+    QStringList options;
+    auto append = [&options](const QString& token) {
+        if (!token.isEmpty() && !options.contains(token)) {
+            options.append(token);
+        }
+    };
+
+    if (m_slice) {
+        for (const QString& ant : m_slice->rxAntennaList()) {
+            append(ant);
+        }
+    }
+
+    for (const QString& ant : m_antList) {
+        append(ant);
+    }
+
+    if (m_radioModel) {
+        for (const QString& ant : m_radioModel->knownAntennaTokens()) {
+            append(ant);
+        }
+    }
+
+    if (m_slice) {
+        append(m_slice->rxAntenna());
+    }
+    return options;
 }
 
 QStringList VfoWidget::txAntennaOptions() const

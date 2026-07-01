@@ -15,6 +15,7 @@
 #include "core/CommandParser.h"   // MessageSeverity for onRadioMessage slot
 #include "core/RadioDiscovery.h"
 #include "core/AudioEngine.h"
+#include "core/ReceivePresentationSync.h"
 #include "core/CatPort.h"
 #ifdef HAVE_WEBSOCKETS
 #include "core/TciServer.h"
@@ -73,8 +74,10 @@
 #include <QHash>
 #include <QJsonObject>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <atomic>
+#include <functional>
 
 class QAbstractSlider;
 class QMediaDevices;
@@ -148,7 +151,6 @@ using DaxBridge = PipeWireAudioBridge;
 #endif
 class VfoWidget;
 class WfmDemodulator;
-class KiwiSdrClient;
 
 // Wheel mode for FlexControl: determines what the encoder knob adjusts.
 //
@@ -184,8 +186,12 @@ public:
     RadioModel& radioModel() { return m_radioModel; }
     const RadioModel& radioModel() const { return m_radioModel; }
     AudioEngine* audioEngine() const { return m_audio; }
+    QsoRecorder* qsoRecorder() const { return m_qsoRecorder; }  // automation bridge
     Q_INVOKABLE void showConnectionDialog();
     Q_INVOKABLE void hideConnectionDialog();
+    QJsonObject automationSetSliceReceiveSource(const QString& arg);
+    QJsonObject automationReceiveSyncSnapshot() const;
+    QJsonObject automationKiwiSdrSnapshot() const;
 
 protected:
     void showEvent(QShowEvent* event) override;
@@ -298,7 +304,9 @@ private:
     void logTunePolicyDecision(const char* source, TuneIntent intent,
                                double oldFreqMhz, double newFreqMhz,
                                const TuneCenteringResult& result) const;
-    void mirrorDiversityChildFrequency(SliceModel* slice, double mhz);
+    void pushSliceFrequencyToOverlays(SliceModel* slice, double mhz);
+    static bool isSameDiversityReceivePair(const SliceModel* slice,
+                                           const SliceModel* other);
     // Pan-follow-VFO (#989): if mhz is outside the visible pan window, apply
     // the new center locally (immediate repaint) and send the radio command.
     TuneCenteringResult panFollowVfo(SliceModel* s, double mhz, const char* source);
@@ -329,8 +337,6 @@ private:
     void refreshKiwiSdrAppletReceivers();
     void refreshKiwiSdrSlices();
     void refreshKiwiSdrWaterfallAvailability();
-    void syncKiwiSdrTrackingToActiveSlice();
-    void setKiwiSdrWaterfallForActiveSlice(bool active);
     void syncKiwiSdrAppletWaterfallState();
     SliceModel* kiwiSdrAudioTargetSlice() const;
     bool setKiwiSdrAudioRouting(bool active);
@@ -349,6 +355,69 @@ private:
     bool autoSquelchShouldRunOnSpectrum(const QString& panId,
                                         const SpectrumWidget* spectrum) const;
     void syncActiveSliceAutoSquelchToSpectrums();
+    void initReceivePresentationSync(); // MainWindow_ReceiveSync.cpp
+    void syncReceivePresentationDelaysToAudioEngine(
+        bool clearVisualQueueOnAbruptDelayChange = true);
+    ReceivePresentationSettings receivePresentationSettings() const;
+    ReceiveDelayBreakdown receivePresentationDelayBreakdown() const;
+    QString receivePresentationOverlayStatsText() const;
+    void setReceivePresentationSyncEnabled(bool enabled);
+    void setReceivePresentationSyncMode(ReceiveSyncMode mode);
+    void adjustReceivePresentationManualOffsetMs(int deltaMs);
+    void resetReceivePresentationManualOffset();
+    void setReceivePresentationLatencyMs(int latencyMs);
+    int receivePresentationDelayMs(
+        ReceivePresentationSource source,
+        ReceivePresentationSurface surface,
+        const QString& sourceId = QString()) const;
+    void deferReceivePresentation(ReceivePresentationSource source,
+                                  ReceivePresentationSurface surface,
+                                  std::function<void()> apply,
+                                  const QString& sourceId = QString());
+    bool receivePresentationHasUsableSyncTarget() const;
+    void resetReceivePresentationAudioBuffers();
+    void resetReceivePresentationAudioBuffersForKiwiSource(
+        const QString& sourceId);
+    void clearReceivePresentationVisualQueue();
+    void clearReceivePresentationVisualQueueForSource(
+        ReceivePresentationSource source,
+        const QString& sourceId = QString());
+    void scheduleReceivePresentationVisualQueue();
+    void drainReceivePresentationVisualQueue();
+    struct ReceiveSyncTarget {
+        enum class State {
+            None,
+            Usable,
+            Ambiguous,
+        };
+        State state{State::None};
+        QString kiwiProfileId;
+        int flexSliceId{-1};
+        int kiwiSliceId{-1};
+        qint64 frequencyHz{0};
+        int audibleFlexCount{0};
+        int audibleKiwiCount{0};
+        int matchingPairCount{0};
+        QString reason;
+
+        bool usable() const { return state == State::Usable; }
+        bool ambiguous() const { return state == State::Ambiguous; }
+    };
+    ReceiveSyncTarget resolveReceiveSyncTarget() const;
+    QString receiveSyncKiwiProfileId() const;
+    QString receiveSyncDelayKiwiProfileId() const;
+    qint64 receiveSyncTunedFrequencyHz() const;
+    void holdReceivePresentationAutoAssistLock(bool clearVisualQueue = true);
+    void resetReceivePresentationAutoAssistState(bool clearEstimate,
+                                                 bool clearVisualQueue = true);
+    void feedReceivePresentationSyncAudio(ReceivePresentationSource source,
+                                          const QByteArray& pcm24kStereoFloat,
+                                          const QString& sourceId = QString(),
+                                          int sampleRateHz =
+                                              AudioEngine::DEFAULT_SAMPLE_RATE);
+    void runReceivePresentationAutoAssist();
+    void applyReceivePresentationAutoAssistEstimate(
+        const ReceiveAudioDelayEstimate& estimate);
     SliceModel* kiwiSdrDisplaySliceForPan(const QString& panId) const;
     QString kiwiSdrProfileForPan(const QString& panId) const;
     QString kiwiSdrOverlayProfileForPan(const QString& panId) const;
@@ -426,6 +495,15 @@ private:
     // just raises the existing instance.  Returns nullptr only if construction
     // failed (e.g. allocation failure).
     AetherDspDialog* ensureAetherDspDialog();
+
+    // Toggle helper for the AetherDSP Settings dialog: open it when hidden,
+    // close it when visible.  Gives the per-slice DSP-tab ADSP button the same
+    // press-to-open / press-again-to-close semantics as its sibling AetherVoice
+    // button (#3877).  close() deletes the WA_DeleteOnClose dialog and clears
+    // the QPointer, so the next press re-creates and re-wires via
+    // ensureAetherDspDialog()'s wasFresh path.  Only the DSP-tab button toggles;
+    // the menu action and chain/strip launchers keep pure open semantics.
+    void toggleAetherDspDialog();
 
     // Wire the txBandSettingsRequested, serialSettingsChanged (HAVE_SERIALPORT),
     // sliceLetterDisplayModeChanged, and QDialog::finished handlers on a freshly-
@@ -524,8 +602,10 @@ private:
 
     BandSnapshot captureCurrentBandState() const;
     void restoreBandState(const BandSnapshot& snap);
-    void startSwrSweep(int requestedSliceId = -1, int sweepPowerWatts = 1);
+    void startSwrSweep(int requestedSliceId = -1, int sweepPowerWatts = 1,
+                       double customLowMhz = 0.0, double customHighMhz = 0.0);
     void clearSwrSweepPlot();
+    void saveSwrSweepCsv();
     void advanceSwrSweep();
     void finishSwrSweep(bool aborted, const QString& reason = {});
     void beginSwrSweepRf();
@@ -546,6 +626,23 @@ private:
     void pushCwPaddleState(const QString& source = {},
                            quint64 traceId = 0, quint64 sourceMs = 0);
     bool handleCwMomentaryShortcut(QKeyEvent* keyEvent, QEvent::Type eventType);
+    // PTT (Hold) shortcut: resolve the bound key via ShortcutManager (not a
+    // hardcoded Qt::Key_Space) so a reassigned PTT-hold key actually keys the
+    // radio. Returns true when the bound key was consumed (#3879).
+    bool handlePttHoldShortcut(QKeyEvent* keyEvent, QEvent::Type eventType);
+    // Fail-safe-to-RX for the momentary-keying family (PTT-hold, CW straight
+    // key / paddles). Called when the window/app is deactivated while a
+    // momentary key is "held" in our state — the KeyRelease that would un-key
+    // goes to whatever now has focus and never reaches our filter, so without
+    // this the transmitter stays keyed. Clears every momentary flag and issues
+    // the matching un-key. No-ops when nothing is active (#3888, Principle VI).
+    void failSafeMomentaryKeyingToRx(const char* reason);
+    // True when ev's physical key equals the base key (modifiers stripped) of
+    // the action's current binding. Lets a held momentary key un-key on its
+    // KeyRelease even when a modifier of a combo binding was released first
+    // (#3888, Principle VI).
+    bool keyEventMatchesActionBaseKey(const char* actionId,
+                                      const QKeyEvent* ev);
 
     // Core objects
     RadioDiscovery    m_discovery;
@@ -729,6 +826,10 @@ private:
     bool    m_rc28PttLatched{false};
     bool    m_hidFastTune{false};
     bool    m_hidFineTune{false};
+    int     m_hidPulseAccum{0};     // accumulated RC-28 encoder pulses for sensitivity divider
+    int     m_hidSensitivity{1};    // RC-28 pulses required per frequency step (1 = off)
+    bool    m_hidAutoSnap{false};   // snap to nearest 1 kHz after rotation stops
+    QTimer* m_hidSnapTimer{nullptr};
     enum class TMate2Overlay { None, Volume, Power, Speed, Wpm, Rit, Xit, Shift, Agc, Apf, Text };
     TMate2Overlay m_tmate2Overlay{TMate2Overlay::None};
     int     m_tmate2OverlayValue{0};
@@ -804,7 +905,6 @@ private:
     // GUI — right applet panel
     AppletPanel*     m_appletPanel{nullptr};
     KiwiSdrManager*  m_kiwiSdrManager{nullptr};
-    KiwiSdrClient*   m_kiwiSdrClient{nullptr};
     int              m_kiwiSdrUiSyncFlags{0};
     bool             m_kiwiSdrUiSyncPending{false};
     int              m_kiwiSdrTrackedSliceId{-1};
@@ -815,6 +915,32 @@ private:
     bool             m_kiwiSdrAudioTransmitMuted{false};
     QMetaObject::Connection m_kiwiSdrAudioMuteConnection;
     QHash<int, bool> m_kiwiSdrVirtualPreviousMute;
+    ReceivePresentationSync m_receivePresentationSync;
+    ReceiveAudioDelayEstimator m_receiveAudioDelayEstimator;
+    ReceivePresentationQueue<std::function<void()>> m_receivePresentationVisualQueue;
+    QHash<QString, qint64> m_receivePresentationVisualLastDueMs;
+    QTimer* m_receivePresentationVisualTimer{nullptr};
+    quint64 m_receivePresentationVisualSequence{0};
+    int m_receivePresentationLastFlexAudioDelayMs{-1};
+    int m_receivePresentationLastKiwiAudioDelayMs{-1};
+    QVector<float> m_receiveSyncFlexAudio;
+    QVector<float> m_receiveSyncKiwiAudio;
+    QString m_receiveSyncKiwiProfileId;
+    QElapsedTimer m_receiveSyncEstimateTimer;
+    QElapsedTimer m_receiveSyncDriftTimer;
+    quint64 m_receiveSyncEstimateGeneration{0};
+    bool m_receiveSyncEstimateInFlight{false};
+    int m_receiveSyncLastEstimateOffsetMs{0};
+    int m_receiveSyncStableEstimateCount{0};
+    ReceiveAudioDelayEstimate m_receiveSyncLastCandidate;
+    int m_receiveSyncLastCandidateAbsoluteOffsetMs{0};
+    bool m_receiveSyncLastCandidateAvailable{false};
+    bool m_receiveSyncLastAcceptedLock{false};
+    bool m_receiveSyncLastNearAppliedLock{false};
+    bool m_receiveSyncLastFarRelockEligible{false};
+    qint64 m_receiveSyncLastFrequencyHz{0};
+    bool m_receiveSyncHaveLastEstimate{false};
+    bool m_receiveSyncTargetUnavailable{false};
 
     // Modeless dialogs
     QPointer<DxClusterDialog> m_spotHubDialog;
@@ -1020,7 +1146,7 @@ private:
     std::atomic<quint64> m_lastCwPaddleSourceMs{0};
     qint64 m_bsConnectGraceUntilMs{0};   // suppress auto-save right after connect
     bool m_keyboardShortcutsEnabled{false}; // global enable for keyboard shortcuts (View menu)
-    bool m_spacePttActive{false};          // true while Space is held for PTT
+    bool m_pttHoldActive{false};           // true while the PTT-hold key is held (#3879)
     bool m_cwStraightKeyActive{false};
     bool m_cwLeftPaddleActive{false};
     bool m_cwRightPaddleActive{false};
@@ -1126,6 +1252,9 @@ private:
     // mid-tick made Pan Lock appear to "fall out" after the drag. The drag-end
     // handler recenters once so Pan Lock re-asserts. (user-reported)
     bool m_sliceDragInProgress{false};
+    int m_sliceDragTargetSliceId{-1};
+    double m_sliceDragTargetMhz{0.0};
+    qint64 m_sliceDragEchoHoldUntilMs{0};
     void setPanFollow(bool on);
     void recenterPanFollowOnSlice0();
 

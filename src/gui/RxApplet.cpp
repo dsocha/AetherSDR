@@ -34,8 +34,10 @@
 #include <QFormLayout>
 #include "core/AppSettings.h"
 #include <QAction>
+#include <QAccessible>
 #include <QFontMetrics>
 #include <QPainter>
+#include <QPointer>
 #include <QWheelEvent>
 #include <QKeyEvent>
 #include <QStyle>
@@ -329,6 +331,19 @@ RxApplet::RxApplet(QWidget* parent) : QWidget(parent)
     m_sqlManualLevel = std::clamp(
         AppSettings::instance().value("LastManualSquelchLevel", "20").toInt(),
         0, 100);
+    m_accessibleFrequencyTimer.setSingleShot(true);
+    connect(&m_accessibleFrequencyTimer, &QTimer::timeout, this, [this]() {
+        if (!QAccessible::isActive() || !m_freqLabel) {
+            return;
+        }
+        if (m_pendingAccessibleFrequencyText == m_lastAccessibleFrequencyText) {
+            return;
+        }
+        m_lastAccessibleFrequencyText = m_pendingAccessibleFrequencyText;
+        QAccessibleValueChangeEvent event(m_freqLabel,
+                                          m_pendingAccessibleFrequencyText);
+        QAccessible::updateAccessibility(&event);
+    });
     buildUI();
 }
 
@@ -396,21 +411,30 @@ void RxApplet::buildUI()
             "font-size: 10px; font-weight: bold; padding: 0 2px; }"
             "QPushButton:hover { color: #66aaff; }");
         connect(m_rxAntBtn, &QPushButton::clicked, this, [this] {
-            QMenu menu(this);
-            const QString cur = m_slice ? m_slice->rxAntenna() : "";
-            const QStringList options = m_slice && !m_slice->rxAntennaList().isEmpty()
-                ? m_slice->rxAntennaList()
-                : m_antList;
-            QStringList menuOptions = options;
+            if (!m_slice) {
+                return;
+            }
+            QPointer<SliceModel> slice = m_slice;
+            const QString cur = slice->rxAntenna();
+            QStringList menuOptions = rxAntennaOptions();
             if (m_kiwiSdrManager) {
-                menuOptions.append(m_kiwiSdrManager->virtualAntennaTokens());
+                for (const QString& ant : m_kiwiSdrManager->virtualAntennaTokens()) {
+                    if (!ant.isEmpty() && !menuOptions.contains(ant)) {
+                        menuOptions.append(ant);
+                    }
+                }
+            }
+            if (menuOptions.isEmpty()) {
+                menuOptions << QStringLiteral("ANT1") << QStringLiteral("ANT2");
             }
             const QString activeKiwiProfile =
-                (m_kiwiSdrManager && m_slice)
-                    ? m_kiwiSdrManager->assignedProfileForSlice(m_slice->sliceId())
+                m_kiwiSdrManager
+                    ? m_kiwiSdrManager->assignedProfileForSlice(slice->sliceId())
                     : QString();
+            QMenu* menu = new QMenu(m_rxAntBtn);
+            connect(menu, &QMenu::aboutToHide, menu, &QObject::deleteLater);
             for (const QString& ant : menuOptions) {
-                QAction* act = menu.addAction(antennaMenuLabel(ant, menuOptions));
+                QAction* act = menu->addAction(antennaMenuLabel(ant, menuOptions));
                 act->setData(ant);
                 act->setCheckable(true);
                 const QString profileId = m_kiwiSdrManager
@@ -422,20 +446,23 @@ void RxApplet::buildUI()
                 act->setToolTip(ant);
                 act->setStatusTip(ant);
             }
-            const QAction* sel = menu.exec(
-                m_rxAntBtn->mapToGlobal(QPoint(0, m_rxAntBtn->height())));
-            if (sel && m_slice) {
+            connect(menu, &QMenu::triggered, this, [this, slice](QAction* sel) {
+                if (!sel || !slice) {
+                    return;
+                }
                 const QString token = sel->data().toString();
                 const QString profileId = m_kiwiSdrManager
                     ? m_kiwiSdrManager->profileIdForVirtualAntennaToken(token)
                     : QString();
                 if (!profileId.isEmpty()) {
-                    emit kiwiRxAntennaSelected(m_slice->sliceId(), profileId);
+                    emit kiwiRxAntennaSelected(slice->sliceId(), profileId);
                 } else {
-                    emit flexRxAntennaSelected(m_slice->sliceId());
-                    m_slice->setRxAntenna(token);
+                    emit flexRxAntennaSelected(slice->sliceId());
+                    slice->setRxAntenna(token);
                 }
-            }
+            });
+            menu->popup(
+                m_rxAntBtn->mapToGlobal(QPoint(0, m_rxAntBtn->height())));
         });
         row->addWidget(m_rxAntBtn);
 
@@ -1878,6 +1905,37 @@ QString RxApplet::antennaMenuLabel(const QString& token,
         token, m_radioModel->antennaAliasNeedsDisambiguation(token, options));
 }
 
+QStringList RxApplet::rxAntennaOptions() const
+{
+    QStringList options;
+    auto append = [&options](const QString& token) {
+        if (!token.isEmpty() && !options.contains(token)) {
+            options.append(token);
+        }
+    };
+
+    if (m_slice) {
+        for (const QString& ant : m_slice->rxAntennaList()) {
+            append(ant);
+        }
+    }
+
+    for (const QString& ant : m_antList) {
+        append(ant);
+    }
+
+    if (m_radioModel) {
+        for (const QString& ant : m_radioModel->knownAntennaTokens()) {
+            append(ant);
+        }
+    }
+
+    if (m_slice) {
+        append(m_slice->rxAntenna());
+    }
+    return options;
+}
+
 QStringList RxApplet::txAntennaOptions() const
 {
     QStringList options;
@@ -2001,6 +2059,8 @@ void RxApplet::connectSlice(SliceModel* s)
     connect(s, &SliceModel::rxAntennaChanged, this, [this](const QString& ant) {
         updateAntennaButton(m_rxAntBtn, ant, false);
     });
+    connect(s, &SliceModel::rxAntennaListChanged,
+            this, [this](const QStringList&) { updateAntennaButtons(); });
 
     // TX antenna
     updateAntennaButton(m_txAntBtn, s->txAntenna(), true);
@@ -2992,7 +3052,15 @@ void RxApplet::updateFreqLabel()
         return;
 
     if (m_slice->isLockedFeedbackActive()) {
+        m_accessibleFrequencyTimer.stop();
         m_freqLabel->setText(QStringLiteral("LOCKED"));
+        if (QAccessible::isActive()
+            && m_lastAccessibleFrequencyText != QStringLiteral("LOCKED")) {
+            m_lastAccessibleFrequencyText = QStringLiteral("LOCKED");
+            QAccessibleValueChangeEvent event(m_freqLabel,
+                                              QStringLiteral("LOCKED"));
+            QAccessible::updateAccessibility(&event);
+        }
         return;
     }
 
@@ -3000,10 +3068,21 @@ void RxApplet::updateFreqLabel()
     int mhzPart  = static_cast<int>(hz / 1000000);
     int khzPart  = static_cast<int>((hz / 1000) % 1000);
     int hzPart   = static_cast<int>(hz % 1000);
-    m_freqLabel->setText(QString("%1.%2.%3")
+    const QString freqText = QString("%1.%2.%3")
         .arg(mhzPart)
         .arg(khzPart, 3, 10, QChar('0'))
-        .arg(hzPart, 3, 10, QChar('0')));
+        .arg(hzPart, 3, 10, QChar('0'));
+    m_freqLabel->setText(freqText);
+    scheduleFrequencyAnnouncement(freqText);
+}
+
+void RxApplet::scheduleFrequencyAnnouncement(const QString& text)
+{
+    if (!QAccessible::isActive()) {
+        return;
+    }
+    m_pendingAccessibleFrequencyText = text;
+    m_accessibleFrequencyTimer.start(300);
 }
 
 void RxApplet::refreshAllMutedDim()

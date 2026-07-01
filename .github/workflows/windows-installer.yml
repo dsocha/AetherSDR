@@ -76,7 +76,7 @@ jobs:
         id: cache-deepfilter
         with:
           path: third_party/deepfilter
-          key: deepfilter-${{ runner.os }}-${{ hashFiles('scripts/setup/setup-deepfilter.ps1') }}
+          key: deepfilter-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/setup/setup-deepfilter.ps1') }}
 
       - name: Setup DeepFilterNet3 (DFNR)
         if: steps.cache-deepfilter.outputs.cache-hit != 'true'
@@ -95,7 +95,7 @@ jobs:
 
       - name: Configure
         run: |
-          cmake -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DMQTT_TLS=OFF -DREQUIRE_KEYCHAIN=ON -DCMAKE_TOOLCHAIN_FILE="$env:CMAKE_TOOLCHAIN_FILE" -DVCPKG_TARGET_TRIPLET="$env:VCPKG_TARGET_TRIPLET"
+          cmake -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DMQTT_TLS=OFF -DREQUIRE_KEYCHAIN=ON -DENABLE_NVIDIA_AFX=ON -DCMAKE_TOOLCHAIN_FILE="$env:CMAKE_TOOLCHAIN_FILE" -DVCPKG_TARGET_TRIPLET="$env:VCPKG_TARGET_TRIPLET"
 
       - name: Build Opus (RADE dependency)
         # ExternalProject dependency ordering via BUILD_BYPRODUCTS is correct,

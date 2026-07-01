@@ -80,7 +80,6 @@
 #include "core/CwSidetoneGenerator.h"
 #include "core/CwxLocalKeyer.h"
 #include "core/IambicKeyer.h"
-#include "core/KiwiSdrClient.h"
 #include "core/KiwiSdrManager.h"
 #include "CatControlApplet.h"
 #include "DaxApplet.h"
@@ -301,6 +300,15 @@ void setStatusBarStationText(QLabel* label, const QString& text)
     label->setMinimumWidth(label->sizeHint().width() + 2);
 }
 
+QString vfoFrequencyText(double mhz)
+{
+    const long long hz = static_cast<long long>(std::round(mhz * 1e6));
+    return QString("%1.%2.%3")
+        .arg(static_cast<int>(hz / 1000000))
+        .arg(static_cast<int>((hz / 1000) % 1000), 3, 10, QChar('0'))
+        .arg(static_cast<int>(hz % 1000), 3, 10, QChar('0'));
+}
+
 #ifdef HAVE_HIDAPI
 // tmate2*DefaultAction helpers moved to MainWindow_Controllers.cpp (#3351 Phase 2a).
 #endif
@@ -428,6 +436,24 @@ int windowsResizeBorderThickness(HWND hwnd)
 // Pure formatting / parsing helpers formerly defined here as file-scope
 // statics now live in MainWindowHelpers.{h,cpp} (#3351 Phase 0). Only
 // helpers coupled to the mutable shortcut-lease state below remain.
+
+bool MainWindow::isSameDiversityReceivePair(const SliceModel* slice,
+                                            const SliceModel* other)
+{
+    if (!slice || !other || slice == other
+        || !slice->diversity() || !other->diversity()) {
+        return false;
+    }
+
+    const bool parentChildPair =
+        (slice->isDiversityParent() && other->isDiversityChild())
+        || (slice->isDiversityChild() && other->isDiversityParent());
+    if (parentChildPair) {
+        return true;
+    }
+
+    return !slice->panId().isEmpty() && slice->panId() == other->panId();
+}
 
 // ─── Shortcut guard (file-scope for use as std::function<bool()>) ───────────
 
@@ -973,6 +999,7 @@ MainWindow::MainWindow(QWidget* parent)
     if (m_leanMode) {
         QTimer::singleShot(0, this, [this]() { applyLeanMode(true); });
     }
+    initReceivePresentationSync();
 
     m_audioThread->setObjectName("AudioEngine");
     m_audio = new AudioEngine;  // no parent — will be moved to thread
@@ -981,9 +1008,14 @@ MainWindow::MainWindow(QWidget* parent)
     m_audio->setRxOutputTrimDb(
         AppSettings::instance().value("RxOutputTrimDb", "0.0").toFloat());
     m_audio->setRxBufferCapMs(
-        AppSettings::instance().value("AudioBufferMs", "200").toInt());
+        AppSettings::instance().value("AudioBufferMs", "100").toInt());
     m_audio->moveToThread(m_audioThread);
     m_audioThread->start();
+    // Start the CW-sidetone record pump on the audio thread (#2539): queued so
+    // its QTimer is created + started on m_audio's thread after the move.
+    QMetaObject::invokeMethod(m_audio, [ae = m_audio]() { ae->startCwRecordPump(); },
+                              Qt::QueuedConnection);
+    syncReceivePresentationDelaysToAudioEngine();
     setupAudioDeviceChangeMonitor();
 
     // QSO audio recorder (#1297) — lives on main thread, audio feeds are thread-safe
@@ -1062,8 +1094,8 @@ MainWindow::MainWindow(QWidget* parent)
     // the state change via atomic without any blocking.
     connect(&m_radioModel, &RadioModel::cwKeyDownChanged,
             this, [this](bool down) {
-        if (m_audio && m_audio->cwSidetone())
-            m_audio->cwSidetone()->setKeyDown(down);
+        if (m_audio)
+            m_audio->setCwKeyDown(down);   // keys audible + recorder sidetone
     });
     // Monitor owns a dedicated QAudioSink in pull mode — no
     // feedDecodedSpeech routing, no timer pacing.  Keeps playback
@@ -1251,6 +1283,14 @@ MainWindow::MainWindow(QWidget* parent)
     // audioDataReady(); we feed that directly to the QAudioSink.
     connect(m_radioModel.panStream(), &PanadapterStream::audioDataReady,
             m_audio, &AudioEngine::feedAudioData);
+    connect(m_audio, &AudioEngine::receivePresentationOutputAudioReady,
+            this, [this](const QString& source, const QString& sourceId,
+                         const QByteArray& pcm, int sampleRate) {
+        const ReceivePresentationSource syncSource =
+            source == QLatin1String("kiwi") ? ReceivePresentationSource::KiwiSdr
+                                            : ReceivePresentationSource::Flex;
+        feedReceivePresentationSyncAudio(syncSource, pcm, sourceId, sampleRate);
+    });
 
     // KiwiSDR is a receive-only alternate source for the active slice.
     // Wiring is local-only: no Flex radio commands are sent from this path.
@@ -1268,15 +1308,15 @@ MainWindow::MainWindow(QWidget* parent)
             m_qsoRecorder, &QsoRecorder::feedTxAudio);
     connect(&m_radioModel.transmitModel(), &TransmitModel::moxChanged,
             m_qsoRecorder, &QsoRecorder::onMoxChanged);
-
-    // ── BNR container autostart ─────────────────────────────────────────
-#ifdef HAVE_BNR
-    if (AppSettings::instance().value("BnrAutostart", "False").toString() == "True") {
-        QString container = AppSettings::instance().value("BnrContainerName", "maxine-bnr").toString();
-        qDebug() << "BNR: autostarting container" << container;
-        QProcess::startDetached("docker", {"start", container});
-    }
-#endif
+    // CW/CWX path (#2539): break-in keys the radio without a local MOX edge and
+    // without a mic-driven txFinalMonitorPcmReady, so voice wiring alone records
+    // silence during CW. The record pump feeds our local sidetone, and
+    // cwRecordingActiveChanged opens the recorder's TX gate for our CW — driven
+    // by our own keyer, so another client's TX never gates our recorder.
+    connect(m_audio, &AudioEngine::cwSidetoneRecordPcmReady,
+            m_qsoRecorder, &QsoRecorder::feedTxAudio);
+    connect(m_audio, &AudioEngine::cwRecordingActiveChanged,
+            m_qsoRecorder, &QsoRecorder::onMoxChanged);
 
     // ── CW decoder: feed audio ──────────────────────────────────────────
     // Audio feed is global (same audio for all pans).
@@ -1982,19 +2022,10 @@ MainWindow::~MainWindow()
     qApp->removeEventFilter(this);
     preparePanadapterUiForShutdown();
 
-    // KiwiSDR clients are QObject children, but their disconnect path emits
+    // KiwiSDR profile clients are QObject children, but their disconnect path emits
     // state changes that are wired back into MainWindow and AudioEngine. Tear
     // them down while MainWindow members are still alive instead of waiting for
     // QWidget child cleanup after member destruction.
-    if (m_kiwiSdrClient) {
-        QObject::disconnect(m_kiwiSdrClient, nullptr, this, nullptr);
-        if (m_audio) {
-            QObject::disconnect(m_kiwiSdrClient, nullptr, m_audio, nullptr);
-        }
-        m_kiwiSdrClient->disconnectFromEndpoint();
-        delete m_kiwiSdrClient;
-        m_kiwiSdrClient = nullptr;
-    }
     if (m_kiwiSdrManager) {
         QObject::disconnect(m_kiwiSdrManager, nullptr, this, nullptr);
         if (m_audio) {
@@ -2041,7 +2072,7 @@ MainWindow::~MainWindow()
         QMetaObject::invokeMethod(audio, [audio]() {
             audio->setNr2Enabled(false);
             audio->setRn2Enabled(false);
-            audio->setBnrEnabled(false);
+            audio->setNvAfxEnabled(false);
             audio->stopRxStream();
             audio->stopTxStream();
         }, Qt::BlockingQueuedConnection);
@@ -2477,6 +2508,18 @@ AetherDspDialog* MainWindow::ensureAetherDspDialog()
     return m_dspDialog.data();
 }
 
+void MainWindow::toggleAetherDspDialog()
+{
+    // Sibling of toggleAetherialStrip(): the per-slice DSP-tab ADSP button is a
+    // toggle, not a one-way launcher (#3877).  When the dialog is already up,
+    // close() deletes it (WA_DeleteOnClose) and clears the QPointer; the next
+    // press re-creates and re-wires through ensureAetherDspDialog().
+    if (m_dspDialog && m_dspDialog->isVisible())
+        m_dspDialog->close();
+    else
+        ensureAetherDspDialog();
+}
+
 #ifdef HAVE_MQTT
 void MainWindow::showMqttSettingsDialog()
 {
@@ -2892,6 +2935,15 @@ void MainWindow::changeEvent(QEvent* event)
 {
     QMainWindow::changeEvent(event);
 
+    // Principle VI fail-safe (#3888): if a momentary keying key (PTT-hold, CW
+    // straight key / paddles) is held when the window is deactivated, its
+    // KeyRelease is delivered to whatever now has focus and never reaches our
+    // event filter — the flag would stay set and TX would stay keyed. Force the
+    // whole family back to RX on deactivation. (Belt-and-suspenders for the
+    // app-backgrounded case lives in eventFilter via ApplicationStateChange.)
+    if (event->type() == QEvent::ActivationChange && !isActiveWindow())
+        failSafeMomentaryKeyingToRx("window-deactivate");
+
     if (event->type() != QEvent::WindowStateChange
         || !m_minimalMode
         || m_exitingMinimalMode
@@ -3101,7 +3153,7 @@ void MainWindow::cancelTransmitFromIndicator()
         return;
     }
 
-    m_spacePttActive = false;
+    m_pttHoldActive = false;
     m_cwStraightKeyActive = false;
     m_cwLeftPaddleActive = false;
     m_cwRightPaddleActive = false;
@@ -3112,8 +3164,8 @@ void MainWindow::cancelTransmitFromIndicator()
         m_iambicKeyer->setPaddleState(false, false);
         m_iambicKeyer->reset();
     }
-    if (m_audio && m_audio->cwSidetone())
-        m_audio->cwSidetone()->setKeyDown(false);
+    if (m_audio)
+        m_audio->setCwKeyDown(false);   // clear audible + recorder sidetone
 
     const quint64 sourceMs = cwTraceNowMs();
     const quint64 traceId = nextCwTraceId();
@@ -5673,31 +5725,44 @@ void MainWindow::logTunePolicyDecision(const char* source, TuneIntent intent,
         << " animationMs=" << result.animationDurationMs;
 }
 
-void MainWindow::mirrorDiversityChildFrequency(SliceModel* slice, double mhz)
+void MainWindow::pushSliceFrequencyToOverlays(SliceModel* slice, double mhz)
 {
-    if (!slice || !slice->isDiversityParent())
+    if (!slice) {
         return;
+    }
 
-    long long hz = static_cast<long long>(std::round(mhz * 1e6));
-    const QString freqStr = QString("%1.%2.%3")
-        .arg(static_cast<int>(hz / 1000000))
-        .arg(static_cast<int>((hz / 1000) % 1000), 3, 10, QChar('0'))
-        .arg(static_cast<int>(hz % 1000), 3, 10, QChar('0'));
-
-    for (auto* other : m_radioModel.slices()) {
-        if (!other->isDiversityChild() || other->sliceId() == slice->sliceId())
-            continue;
-        auto* sw = spectrumForSlice(other);
-        if (!sw)
-            continue;
-        if (auto* vfo = sw->vfoWidget(other->sliceId()))
+    const QString freqStr = vfoFrequencyText(mhz);
+    auto pushOne = [this, mhz, &freqStr](SliceModel* s) {
+        if (!s) {
+            return;
+        }
+        SpectrumWidget* sw = spectrumForSlice(s);
+        if (!sw) {
+            return;
+        }
+        if (VfoWidget* vfo = sw->vfoWidget(s->sliceId())) {
             vfo->freqLabel()->setText(freqStr);
-        sw->setSliceOverlay(other->sliceId(), mhz,
-            other->filterLow(), other->filterHigh(),
-            other->isTxSlice(), false,
-            other->mode(), other->rttyMark(), other->rttyShift(),
-            other->ritOn(), other->ritFreq(),
-            other->xitOn(), other->xitFreq());
+        }
+        sw->setSliceOverlay(s->sliceId(), mhz,
+            s->filterLow(), s->filterHigh(),
+            s->isTxSlice(), s->sliceId() == m_activeSliceId,
+            s->mode(), s->rttyMark(), s->rttyShift(),
+            s->ritOn(), s->ritFreq(),
+            s->xitOn(), s->xitFreq(),
+            s->diversity(), s->isDiversityParent(),
+            s->isDiversityChild(), s->diversityIndex());
+    };
+
+    pushOne(slice);
+    if (!slice->diversity()) {
+        return;
+    }
+
+    for (SliceModel* other : m_radioModel.slices()) {
+        if (!isSameDiversityReceivePair(slice, other)) {
+            continue;
+        }
+        pushOne(other);
     }
 }
 
@@ -5765,7 +5830,7 @@ bool MainWindow::tuneBlockedByGuards(SliceModel* slice)
         auto* sw = spectrumForSlice(slice);
         if (slice->sliceId() == m_activeSliceId && sw) {
             m_updatingFromModel = true;
-            sw->setVfoFrequency(slice->frequency());
+            pushSliceFrequencyToOverlays(slice, slice->frequency());
             m_updatingFromModel = false;
         }
         return true;
@@ -5782,7 +5847,6 @@ void MainWindow::applyTuneRequest(SliceModel* slice, double mhz,
         return;
 
     const double oldFreqMhz = slice->frequency();
-    auto* sw = spectrumForSlice(slice);
 
     // Absolute-target intents (typed VFO entry, spectrum click, spot recall,
     // bandstack recall) must invalidate any in-flight encoder accumulator.
@@ -5799,16 +5863,14 @@ void MainWindow::applyTuneRequest(SliceModel* slice, double mhz,
 #endif
     }
 
-    if (slice->sliceId() == m_activeSliceId && sw)
-        sw->setVfoFrequency(mhz);
+    pushSliceFrequencyToOverlays(slice, mhz);
 
     const BandStackPreselectResult bandPreselect =
         (intent == TuneIntent::CommandedTargetCenter)
             ? preselectBandStackForTune(slice, mhz, source)
             : BandStackPreselectResult::NotNeeded;
     if (bandPreselect == BandStackPreselectResult::Unsupported) {
-        if (slice->sliceId() == m_activeSliceId && sw)
-            sw->setVfoFrequency(oldFreqMhz);
+        pushSliceFrequencyToOverlays(slice, oldFreqMhz);
         return;
     }
 
@@ -5819,12 +5881,8 @@ void MainWindow::applyTuneRequest(SliceModel* slice, double mhz,
             auto* pendingSlice = m_radioModel.slice(sliceId);
             if (!pendingSlice || pendingSlice->isLocked() || m_swrSweep.running)
                 return;
-            if (pendingSlice->sliceId() == m_activeSliceId) {
-                if (auto* pendingSw = spectrumForSlice(pendingSlice))
-                    pendingSw->setVfoFrequency(mhz);
-            }
+            pushSliceFrequencyToOverlays(pendingSlice, mhz);
             pendingSlice->tuneAndRecenter(mhz);
-            mirrorDiversityChildFrequency(pendingSlice, mhz);
 
             const QByteArray sourceUtf8 = sourceName.toUtf8();
             const char* delayedSource = sourceUtf8.constData();
@@ -5839,7 +5897,6 @@ void MainWindow::applyTuneRequest(SliceModel* slice, double mhz,
     }
 
     slice->setFrequency(mhz);
-    mirrorDiversityChildFrequency(slice, mhz);
 
     const TuneCenteringResult result =
         (intent == TuneIntent::IncrementalTune)
@@ -5964,7 +6021,9 @@ void MainWindow::setActiveSliceInternal(int sliceId, bool revealOffscreen)
             sw->setSliceOverlay(sl->sliceId(), sl->frequency(),
                 sl->filterLow(), sl->filterHigh(), sl->isTxSlice(), isActive,
                 sl->mode(), sl->rttyMark(), sl->rttyShift(),
-                sl->ritOn(), sl->ritFreq(), sl->xitOn(), sl->xitFreq());
+                sl->ritOn(), sl->ritFreq(), sl->xitOn(), sl->xitFreq(),
+                sl->diversity(), sl->isDiversityParent(),
+                sl->isDiversityChild(), sl->diversityIndex());
     }
 
     // QSO recorder: track active slice for frequency/mode metadata (#1297)
@@ -5980,7 +6039,6 @@ void MainWindow::setActiveSliceInternal(int sliceId, bool revealOffscreen)
     m_appletPanel->setSlice(s);
     m_appletPanel->updateSliceButtons(m_radioModel.slices(), sliceId);
     refreshKiwiSdrSlices();
-    syncKiwiSdrTrackingToActiveSlice();
     refreshKiwiSdrWaterfallAvailability();
     syncFlexRxPanToAudioEngine();
     // Sync squelch line to newly active slice (handles slice switch without
@@ -6128,7 +6186,9 @@ void MainWindow::pushSliceOverlay(SliceModel* s)
         s->filterLow(), s->filterHigh(), s->isTxSlice(),
         s->sliceId() == m_activeSliceId,
         s->mode(), s->rttyMark(), s->rttyShift(),
-        s->ritOn(), s->ritFreq(), s->xitOn(), s->xitFreq());
+        s->ritOn(), s->ritFreq(), s->xitOn(), s->xitFreq(),
+        s->diversity(), s->isDiversityParent(),
+        s->isDiversityChild(), s->diversityIndex());
 }
 
 void MainWindow::syncTxWaterfallSliceToSpectrums()
@@ -7453,7 +7513,7 @@ void MainWindow::centerActiveSliceInPanadapter(bool forceRadioCenter, double cen
     // Keep the local spectrum centered immediately so the active slice marker
     // is visible before the radio's status echo arrives.
     sw->setFrequencyRange(targetMhz, bandwidthMhz);
-    sw->setVfoFrequency(targetMhz);
+    pushSliceFrequencyToOverlays(s, targetMhz);
 
     if (forceRadioCenter && m_radioModel.isConnected()) {
         m_radioModel.sendCommand(

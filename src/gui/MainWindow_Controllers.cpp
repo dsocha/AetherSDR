@@ -1354,7 +1354,7 @@ void MainWindow::applyFlexControlWheelAction(const QString& actionId, int steps)
             m_flexTargetMhz = snapped / 1e6;
         }
         m_flexTargetMhz += steps * stepHz / 1e6;
-        if (sw) sw->setVfoFrequency(m_flexTargetMhz);
+        pushSliceFrequencyToOverlays(s, m_flexTargetMhz);
         if (!m_flexCoalesceTimer.isActive())
             m_flexCoalesceTimer.start();
     } else if (actionId == "WheelRit") {
@@ -2160,7 +2160,7 @@ void MainWindow::registerMidiParams()
         [this](float v) {
             const bool on = v > 0.5f;
             const bool clientSide =
-                AppSettings::instance().value("RecordingMode", "Radio").toString() == "Client";
+                AppSettings::instance().value("RecordingMode", "Client").toString() == "Client";
             if (clientSide) {
                 if (on) m_qsoRecorder->startRecording();
                 else    m_qsoRecorder->stopRecording();
@@ -2170,7 +2170,7 @@ void MainWindow::registerMidiParams()
         },
         [this]() -> float {
             const bool clientSide =
-                AppSettings::instance().value("RecordingMode", "Radio").toString() == "Client";
+                AppSettings::instance().value("RecordingMode", "Client").toString() == "Client";
             if (clientSide)
                 return (m_qsoRecorder && m_qsoRecorder->isRecording()) ? 1.0f : 0.0f;
             auto* s = activeSlice();
@@ -2181,7 +2181,7 @@ void MainWindow::registerMidiParams()
         [this](float v) {
             const bool on = v > 0.5f;
             const bool clientSide =
-                AppSettings::instance().value("RecordingMode", "Radio").toString() == "Client";
+                AppSettings::instance().value("RecordingMode", "Client").toString() == "Client";
             if (clientSide) {
                 if (on) m_qsoRecorder->startPlayback();
                 else    m_qsoRecorder->stopPlayback();
@@ -2191,7 +2191,7 @@ void MainWindow::registerMidiParams()
         },
         [this]() -> float {
             const bool clientSide =
-                AppSettings::instance().value("RecordingMode", "Radio").toString() == "Client";
+                AppSettings::instance().value("RecordingMode", "Client").toString() == "Client";
             if (clientSide)
                 return (m_qsoRecorder && m_qsoRecorder->isPlaying()) ? 1.0f : 0.0f;
             auto* s = activeSlice();
@@ -2371,7 +2371,7 @@ void MainWindow::wireExternalControllers()
                 m_midiTuneTargetMhz = snapped / 1e6;
             }
             m_midiTuneTargetMhz += steps * stepHz / 1e6;
-            if (spectrum()) spectrum()->setVfoFrequency(m_midiTuneTargetMhz);
+            pushSliceFrequencyToOverlays(s, m_midiTuneTargetMhz);
             m_midiTuneIdleTimer.start();
             applyTuneRequest(s, m_midiTuneTargetMhz, TuneIntent::IncrementalTune,
                              "midi-relative");
@@ -2421,6 +2421,25 @@ void MainWindow::wireExternalControllers()
         });
     }
 
+    // Auto-snap timer: fires 600 ms after the last RC-28 encoder step and snaps
+    // to the nearest 1 kHz using IncrementalTune (no spectrum recenter). (#3841)
+    m_hidSnapTimer = new QTimer(this);
+    m_hidSnapTimer->setSingleShot(true);
+    m_hidSnapTimer->setInterval(600);
+    connect(m_hidSnapTimer, &QTimer::timeout, this, [this] {
+        if (auto* s = activeSlice()) {
+            if (s->isLocked()) return;
+            const double snapped = std::round(s->frequency() * 1000.0) / 1000.0;
+            if (std::abs(snapped - s->frequency()) > 1e-9)
+                applyTuneRequest(s, snapped, TuneIntent::IncrementalTune, "rc28-autosnap");
+        }
+    });
+
+    // Load RC-28 sensitivity and auto-snap from persisted settings.
+    m_hidSensitivity = HidEncoderManager::rc28MappingField("sensitivity", "1").toInt();
+    if (m_hidSensitivity < 1) m_hidSensitivity = 1;
+    m_hidAutoSnap = HidEncoderManager::rc28MappingField("autoSnap", "False") == "True";
+
     // Per-encoder action dispatch — routes each dial to its configured action.
     // applyFlexControlWheelAction handles coalescing internally for frequency.
     connect(m_hidEncoder, &HidEncoderManager::tuneSteps,
@@ -2447,6 +2466,27 @@ void MainWindow::wireExternalControllers()
                    isTMate2 ? tmate2EncoderDefaultAction(encoderIndex)
                              : MainWindow::hidEncoderDefaultAction(encoderIndex))
             .toString();
+        // RC-28 sensitivity divider and auto-snap (#3841).
+        // Only applies to encoder 0 on the RC-28 (the single tuning knob),
+        // and only when that encoder is mapped to frequency tuning.
+        if (m_hidEncoder->isRC28Compatible() && encoderIndex == 0
+                && actionId == QLatin1String("WheelFrequency")) {
+            if (m_hidSensitivity > 1) {
+                // Direction reversal clears the accumulator so pulses from the
+                // previous direction don't bleed into the new one.
+                if (m_hidPulseAccum != 0 && ((steps > 0) != (m_hidPulseAccum > 0)))
+                    m_hidPulseAccum = 0;
+                m_hidPulseAccum += steps;
+                const int fired = m_hidPulseAccum / m_hidSensitivity;
+                m_hidPulseAccum -= fired * m_hidSensitivity;
+                if (fired == 0) {
+                    if (m_hidAutoSnap) m_hidSnapTimer->start();
+                    return;
+                }
+                steps = fired;
+            }
+            if (m_hidAutoSnap) m_hidSnapTimer->start();
+        }
         applyFlexControlWheelAction(actionId, steps);
     });
 

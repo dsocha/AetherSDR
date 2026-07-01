@@ -84,6 +84,12 @@ inline constexpr const char* kCwStraightKeyActionName = "Trigger straight key";
 inline constexpr const char* kCwLeftPaddleActionName = "Trigger CW Left Paddle";
 inline constexpr const char* kCwRightPaddleActionName = "Trigger CW Right Paddle";
 
+// PTT (Hold) action id. Like the CW momentary keys above, PTT-hold has no
+// QShortcut handler (QShortcut has no key-released signal); the app-level
+// event filter drives press/release directly and must look the binding up by
+// this id so a rebound key actually transmits (#3879).
+inline constexpr const char* kPttHoldActionId = "ptt_hold";
+
 // ─── AetherSweep SWR-sweep tuning constants ─────────────────────────────────
 //
 // Shared between the constructor's poll-timer setup (MainWindow.cpp) and the

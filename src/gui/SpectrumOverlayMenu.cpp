@@ -8,6 +8,7 @@
 #include "core/GpuSelector.h"
 #include "models/SliceModel.h"
 #include "models/BandDefs.h"
+#include "models/BandSettings.h"
 #include "core/AppSettings.h"
 #include "core/KiwiSdrManager.h"
 
@@ -16,6 +17,8 @@
 #include <QStandardItemModel>
 #include <QSlider>
 #include <QLabel>
+#include <QCheckBox>
+#include <QDoubleSpinBox>
 #include <QGridLayout>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -625,14 +628,97 @@ void SpectrumOverlayMenu::buildAntPanel()
     sweepRow->addWidget(m_swrClearBtn, 1);
     vbox->addLayout(sweepRow);
 
+    m_swrSaveBtn = new QPushButton("Save CSV");
+    m_swrSaveBtn->setMinimumHeight(22);
+    m_swrSaveBtn->setStyleSheet(sweepBtnStyle);
+    vbox->addWidget(m_swrSaveBtn);
+
+    // Optional manual sweep range. Off by default → full-band sweep (unchanged
+    // behaviour). When ticked, the From/To fields bound the sweep so operators
+    // can confine it to their licence sub-band or a slice of interest. The
+    // values are clamped to the in-region band edges receiver-side, so this can
+    // only ever narrow the sweep. (#2241)
+    m_swrRangeCheck = new QCheckBox("Limit range");
+    m_swrRangeCheck->setStyleSheet(
+        "QCheckBox { color: #ffd070; font-size: 10px; font-weight: bold; }");
+    vbox->addWidget(m_swrRangeCheck);
+
+    auto* rangeRow = new QHBoxLayout;
+    rangeRow->setSpacing(4);
+    const QString spinStyle =
+        "QDoubleSpinBox { background: rgba(38, 34, 24, 235); "
+        "border: 1px solid #705820; border-radius: 2px; "
+        "color: #ffd070; font-size: 10px; padding: 0 2px; }"
+        "QDoubleSpinBox:disabled { color: #706858; border-color: #403828; }";
+    auto makeFreqSpin = [&]() {
+        auto* spin = new QDoubleSpinBox;
+        spin->setRange(0.0, 60.0);
+        spin->setDecimals(3);
+        spin->setSingleStep(0.001);
+        spin->setSuffix(" MHz");
+        spin->setStyleSheet(spinStyle);
+        spin->setEnabled(false);
+        return spin;
+    };
+    auto* fromLabel = new QLabel("From");
+    fromLabel->setStyleSheet("QLabel { color: #b0a080; font-size: 10px; }");
+    auto* toLabel = new QLabel("To");
+    toLabel->setStyleSheet("QLabel { color: #b0a080; font-size: 10px; }");
+    m_swrLowSpin = makeFreqSpin();
+    m_swrHighSpin = makeFreqSpin();
+    rangeRow->addWidget(fromLabel);
+    rangeRow->addWidget(m_swrLowSpin, 1);
+    rangeRow->addWidget(toLabel);
+    rangeRow->addWidget(m_swrHighSpin, 1);
+    vbox->addLayout(rangeRow);
+
+    // Seed the From/To fields with the current band's edges so they start at a
+    // sensible in-band range the operator can narrow.
+    auto seedSwrRangeFromBand = [this]() {
+        if (!m_slice)
+            return;
+        const QString band = BandSettings::bandForFrequency(m_slice->frequency());
+        const BandDef& def = BandSettings::bandDef(band);
+        if (def.lowMhz <= 0.0 || def.highMhz <= def.lowMhz)
+            return;
+        m_swrLowSpin->setValue(def.lowMhz);
+        m_swrHighSpin->setValue(def.highMhz);
+    };
+    connect(m_swrRangeCheck, &QCheckBox::toggled, this,
+            [this, seedSwrRangeFromBand](bool on) {
+        m_swrLowSpin->setEnabled(on);
+        m_swrHighSpin->setEnabled(on);
+        if (!on || !m_slice)
+            return;
+        // (Re)seed when the fields are empty or no longer lie within the active
+        // band — e.g. the operator changed band since the last seed — so the
+        // range always opens from a sensible in-band starting point. A range
+        // the operator narrowed *within* the current band is preserved.
+        const QString band = BandSettings::bandForFrequency(m_slice->frequency());
+        const BandDef& def = BandSettings::bandDef(band);
+        const bool empty = m_swrLowSpin->value() <= 0.0 || m_swrHighSpin->value() <= 0.0;
+        const bool inBand = def.lowMhz > 0.0
+            && m_swrLowSpin->value() >= def.lowMhz
+            && m_swrHighSpin->value() <= def.highMhz;
+        if (empty || !inBand)
+            seedSwrRangeFromBand();
+    });
+
     connect(m_swrStartBtn, &QPushButton::clicked, this, [this]() {
         const int sliceId = m_slice ? m_slice->sliceId() : -1;
+        const bool limit = m_swrRangeCheck->isChecked();
+        const double low = limit ? m_swrLowSpin->value() : 0.0;
+        const double high = limit ? m_swrHighSpin->value() : 0.0;
         hideAllSubPanels();
-        emit swrSweepStartRequested(sliceId, 1);
+        emit swrSweepStartRequested(sliceId, 1, low, high);
     });
     connect(m_swrClearBtn, &QPushButton::clicked, this, [this]() {
         hideAllSubPanels();
         emit swrSweepClearRequested();
+    });
+    connect(m_swrSaveBtn, &QPushButton::clicked, this, [this]() {
+        hideAllSubPanels();
+        emit swrSweepSaveCsvRequested();
     });
 
     // ANT panel tooltips
@@ -644,6 +730,10 @@ void SpectrumOverlayMenu::buildAntPanel()
     m_wnbSlider->setToolTip("Adjusts WNB threshold. Higher values blank more aggressively.");
     m_swrStartBtn->setToolTip("Run a low-power tune sweep across the current TX band and plot SWR on the panadapter.");
     m_swrClearBtn->setToolTip("Clear the displayed SWR sweep trace.");
+    m_swrSaveBtn->setToolTip("Export the most recent SWR sweep (frequency + SWR) to a CSV file.");
+    m_swrRangeCheck->setToolTip("Limit the sweep to a manual frequency range instead of the whole band. Clamped to your in-region band edges.");
+    m_swrLowSpin->setToolTip("Sweep start frequency (clamped to the band).");
+    m_swrHighSpin->setToolTip("Sweep stop frequency (clamped to the band).");
 
     m_antPanel->setFixedWidth(180);
     updateLoopButtonVisibility();
@@ -771,12 +861,36 @@ void SpectrumOverlayMenu::refreshAntennaCombo()
     if (!m_rxAntCmb)
         return;
     const QString cur = currentRxAntennaToken();
-    QStringList options = m_antList;
+    QStringList options;
+    auto append = [&options](const QString& token) {
+        if (!token.isEmpty() && !options.contains(token)) {
+            options.append(token);
+        }
+    };
+
+    SliceModel* targetSlice =
+        antennaTargetSliceForPan(m_radioModel, m_slice, m_panId);
+    if (targetSlice) {
+        for (const QString& token : targetSlice->rxAntennaList()) {
+            append(token);
+        }
+    }
+    for (const QString& token : m_antList) {
+        append(token);
+    }
+    if (m_radioModel) {
+        for (const QString& token : m_radioModel->knownAntennaTokens()) {
+            append(token);
+        }
+    }
+    append(cur);
+    if (options.isEmpty()) {
+        append(QStringLiteral("ANT1"));
+        append(QStringLiteral("ANT2"));
+    }
     if (m_kiwiSdrManager) {
         for (const QString& token : m_kiwiSdrManager->virtualAntennaTokens()) {
-            if (!options.contains(token)) {
-                options.append(token);
-            }
+            append(token);
         }
     }
     QSignalBlocker sb(m_rxAntCmb);
@@ -1492,28 +1606,16 @@ void SpectrumOverlayMenu::buildDisplayPanel()
         auto* clearBtn = new QPushButton("Clear");
         clearBtn->setFixedHeight(18);
         clearBtn->setStyleSheet(btnStyle);
-        clearBtn->setToolTip("Revert to the default logo background");
+        clearBtn->setToolTip("Left-click: revert to the default logo background.\n"
+                             "Right-click: turn the background off entirely.");
         connect(clearBtn, &QPushButton::clicked, this, [this] {
             emit backgroundImageCleared();
         });
+        // Right-click clears the background completely (no image, just the fill).
+        clearBtn->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(clearBtn, &QWidget::customContextMenuRequested, this,
+                [this](const QPoint&) { emit backgroundImageDisabled(); });
         grid->addWidget(clearBtn, row, 3);
-        ++row;
-    }
-
-    // ── Lean render mode toggle (#3283) ─────────────────────────────────
-    // Global low-overhead render mode: opaque panadapter + VFO, capped
-    // repaint, WAVE scope off, throttled meters. Lives under Display, just
-    // below the background chooser. Drives the app-wide toggle.
-    {
-        m_leanBtn = new QPushButton("Lean Mode");
-        m_leanBtn->setCheckable(true);
-        m_leanBtn->setStyleSheet(btnStyle);
-        m_leanBtn->setToolTip("Lean mode: opaque panadapter + VFO, capped "
-                              "repaint, WAVE scope off, throttled meters. "
-                              "Reduces CPU/GPU load. Persists across restarts.");
-        connect(m_leanBtn, &QPushButton::toggled, this,
-                [this](bool on) { emit leanModeToggled(on); });
-        grid->addWidget(m_leanBtn, row, 0, 1, 4);
         ++row;
     }
 
@@ -1567,6 +1669,65 @@ void SpectrumOverlayMenu::buildDisplayPanel()
         grid->addWidget(m_colorSchemeCmb, row, 1, 1, 3);
         connect(m_colorSchemeCmb, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, [this](int idx) { emit wfColorSchemeChanged(idx); });
+        ++row;
+    }
+
+    // ── Spectrum render mode (2D waterfall vs 3DSS) ───────────────────────
+    {
+        auto* lbl = new QLabel("Spectrum:");
+        lbl->setStyleSheet(labelStyle);
+        grid->addWidget(lbl, row, 0);
+        m_renderModeCmb = new QComboBox;
+        m_renderModeCmb->setObjectName("spectrumRenderModeCombo");  // bridge-addressable
+        m_renderModeCmb->setFixedHeight(18);
+        applyComboStyle(m_renderModeCmb);
+        m_renderModeCmb->addItem("2D Waterfall");       // SpectrumRenderMode::Mode2D
+        m_renderModeCmb->addItem("3D Stacked Trace");   // SpectrumRenderMode::Mode3D
+        m_renderModeCmb->setToolTip(
+            "2D: FFT trace + waterfall.\n"
+            "3D: perspective stacked-trace spectrum stream.");
+        grid->addWidget(m_renderModeCmb, row, 1, 1, 3);
+        connect(m_renderModeCmb, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [this](int idx) { emit spectrumRenderModeChanged(idx); });
+        ++row;
+    }
+
+    // ── 3D floor depth — how far below the noise floor to surface (dB) ────
+    makeRow("3D Floor:", 0, 24, 6, m_dssFloorSlider, m_dssFloorLabel);
+    if (m_dssFloorSlider) m_dssFloorSlider->setObjectName("dssFloorDepthSlider");
+    connect(m_dssFloorSlider, &QSlider::valueChanged, this, [this](int v) {
+        if (m_dssFloorLabel) m_dssFloorLabel->setText(QString::number(v));
+        emit dssFloorDepthChanged(v);
+    });
+
+    // ── 3D gain — how far down the strength range the colormap reaches ────
+    makeRow("3D Gain:", 0, 100, 70, m_dssGainSlider, m_dssGainLabel);
+    if (m_dssGainSlider) {
+        m_dssGainSlider->setObjectName("dssGainSlider");
+        m_dssGainSlider->setToolTip(
+            "3D surface colour gain: how far down the signal range the colormap "
+            "reaches.\nHigher = colour down toward the noise floor; lower = "
+            "colour only on the strongest signals.");
+    }
+    connect(m_dssGainSlider, &QSlider::valueChanged, this, [this](int v) {
+        if (m_dssGainLabel) m_dssGainLabel->setText(QString::number(v));
+        emit dssGainChanged(v);
+    });
+
+    // ── Lean render mode toggle (#3283) ─────────────────────────────────
+    // Global low-overhead render mode: opaque panadapter + VFO, capped
+    // repaint, WAVE scope off, throttled meters. Grouped with the spectrum
+    // render controls, below the 3D Floor slider. Drives the app-wide toggle.
+    {
+        m_leanBtn = new QPushButton("Lean Mode");
+        m_leanBtn->setCheckable(true);
+        m_leanBtn->setStyleSheet(btnStyle);
+        m_leanBtn->setToolTip("Lean mode: opaque panadapter + VFO, capped "
+                              "repaint, WAVE scope off, throttled meters. "
+                              "Reduces CPU/GPU load. Persists across restarts.");
+        connect(m_leanBtn, &QPushButton::toggled, this,
+                [this](bool on) { emit leanModeToggled(on); });
+        grid->addWidget(m_leanBtn, row, 0, 1, 4);
         ++row;
     }
 
@@ -1718,7 +1879,10 @@ void SpectrumOverlayMenu::syncDisplaySettings(int avg, int fps, int fillPct,
                                                bool heatMap, int colorScheme,
                                                bool showGrid,
                                                float lineWidth,
-                                               bool autoBlackRadioSide)
+                                               bool autoBlackRadioSide,
+                                               int renderMode,
+                                               int dssFloorDepth,
+                                               int dssGain)
 {
     if (!m_avgSlider) return;  // panel not built yet
 
@@ -1774,6 +1938,20 @@ void SpectrumOverlayMenu::syncDisplaySettings(int avg, int fps, int fillPct,
     if (m_colorSchemeCmb) {
         QSignalBlocker bc(m_colorSchemeCmb);
         m_colorSchemeCmb->setCurrentIndex(colorScheme);
+    }
+    if (m_renderModeCmb) {
+        QSignalBlocker br(m_renderModeCmb);
+        m_renderModeCmb->setCurrentIndex(renderMode);
+    }
+    if (m_dssFloorSlider) {
+        QSignalBlocker bf(m_dssFloorSlider);
+        m_dssFloorSlider->setValue(dssFloorDepth);
+        if (m_dssFloorLabel) m_dssFloorLabel->setText(QString::number(dssFloorDepth));
+    }
+    if (m_dssGainSlider) {
+        QSignalBlocker bc(m_dssGainSlider);
+        m_dssGainSlider->setValue(dssGain);
+        if (m_dssGainLabel) m_dssGainLabel->setText(QString::number(dssGain));
     }
 }
 
@@ -2270,6 +2448,16 @@ bool SpectrumOverlayMenu::eventFilter(QObject* obj, QEvent* event)
         if (event->type() == QEvent::Wheel
             || event->type() == QEvent::MouseButtonPress
             || event->type() == QEvent::MouseButtonRelease) {
+            if (auto* panel = qobject_cast<QWidget*>(obj)) {
+                if (auto* mouseEvent = dynamic_cast<QMouseEvent*>(event);
+                    mouseEvent && panel->childAt(mouseEvent->pos())) {
+                    return QWidget::eventFilter(obj, event);
+                }
+                if (auto* wheelEvent = dynamic_cast<QWheelEvent*>(event);
+                    wheelEvent && panel->childAt(wheelEvent->position().toPoint())) {
+                    return QWidget::eventFilter(obj, event);
+                }
+            }
             return true;  // consumed
         }
     }

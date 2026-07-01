@@ -35,7 +35,6 @@
 #include "TunerApplet.h"
 #include "TxApplet.h"
 #include "core/PeripheralSettings.h"
-#include "core/KiwiSdrClient.h"
 #include "core/KiwiSdrManager.h"
 #include "core/KiwiSdrProtocol.h"
 #include "SpectrumOverlayMenu.h"
@@ -56,6 +55,7 @@
 
 #include <QDateTime>
 #include <QFileDialog>
+#include <QPointer>
 #include <QSet>
 #include <QTimer>
 
@@ -112,27 +112,6 @@ bool dbmRangeLooksPlausible(float minDbm, float maxDbm)
         && maxDbm <= kMaxAllowedDbm
         && rangeDb >= kMinRangeDb
         && rangeDb <= kMaxRangeDb;
-}
-
-const SliceModel* kiwiSliceForPan(const RadioModel& radioModel,
-                                  const QString& panId,
-                                  int activeSliceId)
-{
-    if (panId.isEmpty()) {
-        return nullptr;
-    }
-
-    for (SliceModel* slice : radioModel.slices()) {
-        if (!slice || slice->panId() != panId
-            || !radioModel.sliceMayBelongToUs(slice->sliceId())) {
-            continue;
-        }
-
-        if (slice->sliceId() == activeSliceId) {
-            return slice;
-        }
-    }
-    return nullptr;
 }
 
 SliceModel* kiwiAssignedSliceForPan(const RadioModel& radioModel,
@@ -574,16 +553,45 @@ void MainWindow::onSliceAdded(SliceModel* s)
         // HID encoder frequency tuning routes through applyFlexControlWheelAction,
         // so m_flexCoalesceTimer above already covers it.
         const bool memoryRevealPending = (m_pendingMemoryRevealSliceId == s->sliceId());
-        if (activeTuning && s->sliceId() == m_activeSliceId && !memoryRevealPending)
+        SliceModel* active = m_radioModel.slice(m_activeSliceId);
+        const bool activeDiversityPartner = isSameDiversityReceivePair(active, s);
+        SliceModel* dragTarget = m_radioModel.slice(m_sliceDragTargetSliceId);
+        const bool dragDiversityPartner = isSameDiversityReceivePair(dragTarget, s);
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        const bool dragEchoHoldActive =
+            m_sliceDragInProgress
+            || (m_sliceDragEchoHoldUntilMs > 0 && nowMs < m_sliceDragEchoHoldUntilMs);
+        const bool dragTargetSlice =
+            m_sliceDragTargetSliceId >= 0
+            && (s->sliceId() == m_sliceDragTargetSliceId || dragDiversityPartner);
+        if (dragEchoHoldActive && dragTargetSlice
+            && m_sliceDragTargetMhz > 0.0 && !memoryRevealPending) {
+            const int sliceId = s->sliceId();
+            QTimer::singleShot(0, this, [this, sliceId]() {
+                const double displayMhz = m_sliceDragTargetMhz;
+                if (displayMhz <= 0.0) {
+                    return;
+                }
+                if (!m_sliceDragInProgress
+                    && QDateTime::currentMSecsSinceEpoch() >= m_sliceDragEchoHoldUntilMs) {
+                    return;
+                }
+                SliceModel* slice = m_radioModel.slice(sliceId);
+                if (!slice) {
+                    return;
+                }
+                pushSliceFrequencyToOverlays(slice, displayMhz);
+            });
             return;
+        }
+        if (activeTuning
+            && (s->sliceId() == m_activeSliceId || activeDiversityPartner)
+            && !memoryRevealPending) {
+            return;
+        }
 
         m_updatingFromModel = true;
-        if (auto* sw = spectrumForSlice(s))
-            sw->setSliceOverlay(s->sliceId(), mhz,
-                s->filterLow(), s->filterHigh(), s->isTxSlice(),
-                s->sliceId() == m_activeSliceId,
-                s->mode(), s->rttyMark(), s->rttyShift(),
-                s->ritOn(), s->ritFreq(), s->xitOn(), s->xitFreq());
+        pushSliceFrequencyToOverlays(s, mhz);
         m_updatingFromModel = false;
         if (s->isTxSlice())
             syncTxWaterfallSliceToSpectrums();
@@ -637,7 +645,9 @@ void MainWindow::onSliceAdded(SliceModel* s)
         sw->setSliceOverlay(s->sliceId(), s->frequency(),
             lo, hi, s->isTxSlice(), s->sliceId() == m_activeSliceId,
             s->mode(), s->rttyMark(), s->rttyShift(),
-            s->ritOn(), s->ritFreq(), s->xitOn(), s->xitFreq());
+            s->ritOn(), s->ritFreq(), s->xitOn(), s->xitFreq(),
+            s->diversity(), s->isDiversityParent(),
+            s->isDiversityChild(), s->diversityIndex());
         if (s->isTxSlice())
             syncTxWaterfallSliceToSpectrums();
     });
@@ -688,7 +698,9 @@ void MainWindow::onSliceAdded(SliceModel* s)
                 s->filterLow(), s->filterHigh(), tx,
                 s->sliceId() == m_activeSliceId,
                 s->mode(), s->rttyMark(), s->rttyShift(),
-                s->ritOn(), s->ritFreq(), s->xitOn(), s->xitFreq());
+                s->ritOn(), s->ritFreq(), s->xitOn(), s->xitFreq(),
+                s->diversity(), s->isDiversityParent(),
+                s->isDiversityChild(), s->diversityIndex());
         syncTxWaterfallSliceToSpectrums();
         updateSplitState();
 
@@ -739,14 +751,12 @@ void MainWindow::onSliceAdded(SliceModel* s)
                     QMetaObject::invokeMethod(m_audio, [this]() { m_audio->setNr2Enabled(false); });
                 if (m_audio->rn2Enabled())
                     QMetaObject::invokeMethod(m_audio, [this]() { m_audio->setRn2Enabled(false); });
-#ifdef HAVE_BNR
-                if (m_audio->bnrEnabled())
-                    QMetaObject::invokeMethod(m_audio, [this]() { m_audio->setBnrEnabled(false); });
-#endif
                 if (m_audio->nr4Enabled())
                     QMetaObject::invokeMethod(m_audio, [this]() { m_audio->setNr4Enabled(false); });
                 if (m_audio->dfnrEnabled())
                     QMetaObject::invokeMethod(m_audio, [this]() { m_audio->setDfnrEnabled(false); });
+                if (m_audio->nvAfxEnabled())  // AFX is a speech denoiser too
+                    QMetaObject::invokeMethod(m_audio, [this]() { m_audio->setNvAfxEnabled(false); });
             }
         }
 #ifdef HAVE_RADE
@@ -839,19 +849,41 @@ void MainWindow::onSliceAdded(SliceModel* s)
 
     // Feed S-meter per-slice — only this VFO's slice level
     const int sid = s->sliceId();
+    const QPointer<VfoWidget> vfoPtr(vfo);
     connect(&m_radioModel.meterModel(), &MeterModel::sLevelChanged,
-            vfo, [this, vfo, sid](int sliceIndex, float dbm) {
+            vfo, [this, vfoPtr, sid](int sliceIndex, float dbm) {
         if (sliceIndex == sid
             && (!m_kiwiSdrManager
                 || m_kiwiSdrManager->assignedProfileForSlice(sid).isEmpty())) {
-            vfo->setSignalLevel(dbm);
+            deferReceivePresentation(
+                ReceivePresentationSource::Flex,
+                ReceivePresentationSurface::Meter,
+                [this, vfoPtr, sid, dbm]() {
+                    if (!vfoPtr
+                        || (m_kiwiSdrManager
+                            && !m_kiwiSdrManager
+                                    ->assignedProfileForSlice(sid).isEmpty())) {
+                        return;
+                    }
+                    vfoPtr->setSignalLevel(dbm);
+                },
+                QString::number(sid));
         }
     });
     // Feed ESC meter per-slice — signal strength after ESC processing
     connect(&m_radioModel.meterModel(), &MeterModel::escLevelChanged,
-            vfo, [vfo, sid](int sliceIndex, float dbm) {
-        if (sliceIndex == sid)
-            vfo->setEscLevel(dbm);
+            vfo, [this, vfoPtr, sid](int sliceIndex, float dbm) {
+        if (sliceIndex == sid) {
+            deferReceivePresentation(
+                ReceivePresentationSource::Flex,
+                ReceivePresentationSurface::Meter,
+                [vfoPtr, dbm]() {
+                    if (vfoPtr) {
+                        vfoPtr->setEscLevel(dbm);
+                    }
+                },
+                QString::number(sid));
+        }
     });
     // Feed the SmartMTR TX scales: mic level + compression (dBFS / dB) from
     // micMetersChanged, and forward power + SWR from txMetersChanged. The VFO
@@ -1565,6 +1597,9 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
     if (m_appletPanel && m_appletPanel->rxApplet()) {
         QObject::disconnect(m_appletPanel->rxApplet(), nullptr, sw, nullptr);
     }
+    sw->setFpsMeterSyncStatsProvider([this]() {
+        return receivePresentationOverlayStatsText();
+    });
 
     auto updateKiwiWaterfallView = [this, applet, sw](double centerMhz,
                                                       double bandwidthMhz) {
@@ -1584,23 +1619,19 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
                 m_kiwiSdrManager->updateWaterfallView(
                     slice->sliceId(), applet->panId(), centerMhz,
                     bandwidthMhz, sw->wfLineDuration());
-                if (profileId == displayProfileId
-                    && m_kiwiSdrManager->isConnected(profileId)) {
-                    sw->setKiwiSdrWaterfallAvailable(true);
+                const bool profileCanDriveWaterfall =
+                    KiwiSdrClient::stateAllowsReceiverControl(
+                        m_kiwiSdrManager->state(profileId))
+                    && m_kiwiSdrManager->waterfallAvailable(profileId);
+                if (profileId == displayProfileId && profileCanDriveWaterfall) {
+                    sw->setKiwiSdrWaterfallAvailable(
+                        m_kiwiSdrManager->waterfallAvailable(profileId));
                     sw->setKiwiSdrWaterfallProfile(profileId);
                     sw->setKiwiSdrWaterfallActive(true);
                     syncKiwiSdrAppletWaterfallState();
                 }
             }
         }
-        if (!m_kiwiSdrClient || !m_kiwiSdrClient->isConnected()
-            || !applet || !sw
-            || !kiwiSliceForPan(m_radioModel, applet->panId(), m_activeSliceId)) {
-            return;
-        }
-        m_kiwiSdrClient->setWaterfallLineDurationMs(sw->wfLineDuration());
-        m_kiwiSdrClient->setWaterfallView(
-            applet->panId(), centerMhz, bandwidthMhz);
     };
 
     const auto updateKiwiWaterfallViewUnlessDeferred =
@@ -2181,6 +2212,12 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
     });
     connect(menu, &SpectrumOverlayMenu::wfColorSchemeChanged,
             sw, &SpectrumWidget::setWfColorScheme);
+    connect(menu, &SpectrumOverlayMenu::spectrumRenderModeChanged,
+            sw, &SpectrumWidget::setSpectrumRenderMode);
+    connect(menu, &SpectrumOverlayMenu::dssFloorDepthChanged,
+            sw, &SpectrumWidget::setDssFloorDepth);
+    connect(menu, &SpectrumOverlayMenu::dssGainChanged,
+            sw, &SpectrumWidget::setDssGain);
     connect(menu, &SpectrumOverlayMenu::wfColorGainChanged,
             this, [this, applet, sw](int v) {
         if (!kiwiSdrProfileForPan(applet->panId()).isEmpty()) {
@@ -2250,10 +2287,6 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
             return;
         }
         sw->setWfLineDuration(clampedMs);
-        if (m_kiwiSdrClient && m_kiwiSdrClient->isConnected()
-            && kiwiSliceForPan(m_radioModel, applet->panId(), m_activeSliceId)) {
-            m_kiwiSdrClient->setWaterfallLineDurationMs(clampedMs);
-        }
         auto* pan = m_radioModel.panadapter(applet->panId());
         if (pan && !pan->waterfallId().isEmpty())
             m_radioModel.sendCommand(
@@ -2340,6 +2373,15 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
         sw->setBackgroundImage(":/bg-default.jpg");
         auto& s = AppSettings::instance();
         s.setValue(sw->settingsKey("BackgroundImage"), ":/bg-default.jpg");
+        s.save();
+    });
+    // Right-click "Clear": turn the background off entirely (no image, just the
+    // fill colour) and persist as "none" so it stays off across restarts.
+    connect(menu, &SpectrumOverlayMenu::backgroundImageDisabled,
+            this, [sw] {
+        sw->setBackgroundImage(QString());
+        auto& s = AppSettings::instance();
+        s.setValue(sw->settingsKey("BackgroundImage"), "none");
         s.save();
     });
     connect(menu, &SpectrumOverlayMenu::backgroundOpacityChanged,
@@ -2435,12 +2477,21 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
         s.setValue(sw->settingsKey("DisplayFreqGridSpacing"),     "0");
         s.setValue(sw->settingsKey("DisplayNoiseFloorEnable"),    "False");
         s.setValue(sw->settingsKey("DisplayNoiseFloorPosition"),  "75");
+        s.setValue(sw->settingsKey("DisplaySpectrumRenderMode"),  "0");
+        s.setValue(sw->settingsKey("Display3DFloorDepth"),        "6");
+        s.setValue(sw->settingsKey("Display3DGain"),        "70");
         s.save();
 
-        // Sync all Display panel UI controls
+        // Apply the render-mode + 3D-floor reset to the widget too (the keys
+        // above only update settings, not the live SpectrumWidget).
+        sw->setSpectrumRenderMode(0);
+        sw->setDssFloorDepth(6);
+        sw->setDssGain(70);
+
+        // Sync all Display panel UI controls (incl. the 2D/3D combo + 3D Floor).
         menu->syncDisplaySettings(0, 25, 70, false, QColor(0x00, 0xe5, 0xff),
                                   50, 15, true, 50, 100, 75, false, true, 0,
-                                  true, 2.0f, false);
+                                  true, 2.0f, false, 0, 6);
         menu->syncExtraDisplaySettings(false, 1.15f, 80, 0,
                                        QColor(0x0a, 0x0a, 0x14));
     });
@@ -2532,15 +2583,31 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
             }
         }
         queueActiveSliceForSpectrumTarget(target->sliceId());
+        m_sliceDragTargetSliceId = target->sliceId();
+        m_sliceDragTargetMhz = sliceFreqMhz;
+        m_sliceDragEchoHoldUntilMs = 0;
+        pushSliceFrequencyToOverlays(target, sliceFreqMhz);
         target->setFrequency(sliceFreqMhz);
-        mirrorDiversityChildFrequency(target, sliceFreqMhz);  // keep diversity child in step
     });
     // Pan Follow ("Pan Lock") stands down for the whole duration of a slice drag
     // so it doesn't fight the drag (in-window tune or edge auto-pan) with per-tick
     // recenters; on release it recenters once so Pan Lock re-asserts. (user-reported)
     connect(sw, &SpectrumWidget::sliceDragActiveChanged, this, [this](bool active) {
         m_sliceDragInProgress = active;
+        if (active) {
+            m_sliceDragTargetSliceId = -1;
+            m_sliceDragTargetMhz = 0.0;
+            m_sliceDragEchoHoldUntilMs = 0;
+            return;
+        }
         if (!active) {
+            if (m_sliceDragTargetSliceId >= 0 && m_sliceDragTargetMhz > 0.0) {
+                if (SliceModel* target = m_radioModel.slice(m_sliceDragTargetSliceId)) {
+                    pushSliceFrequencyToOverlays(target, m_sliceDragTargetMhz);
+                    target->setFrequency(m_sliceDragTargetMhz);
+                }
+                m_sliceDragEchoHoldUntilMs = QDateTime::currentMSecsSinceEpoch() + 350;
+            }
             recenterPanFollowOnSlice0();   // re-assert Pan Lock on release (self-guards if off)
         }
     });
@@ -2862,6 +2929,8 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
             this, &MainWindow::startSwrSweep);
     connect(menu, &SpectrumOverlayMenu::swrSweepClearRequested,
             this, &MainWindow::clearSwrSweepPlot);
+    connect(menu, &SpectrumOverlayMenu::swrSweepSaveCsvRequested,
+            this, &MainWindow::saveSwrSweepCsv);
 
     // Client-side DSP toggles (NR2 / RN2 / NR4 / MNR / BNR / DFNR) now
     // live exclusively in the AetherDSP applet; the spectrum overlay menu
@@ -3128,7 +3197,8 @@ void MainWindow::wireVfoWidget(VfoWidget* w, SliceModel* s)
                 m_radioModel.slice(sliceId));
         }
     });
-    connect(s, &SliceModel::diversityChanged, this, [this](bool) {
+    connect(s, &SliceModel::diversityChanged, this, [this, s](bool) {
+        pushSliceOverlay(s);
         syncKiwiSdrDiversityEscControls();
     });
     connect(w, &VfoWidget::closeSliceRequested, this, [this, sliceId]() {
@@ -3155,7 +3225,7 @@ void MainWindow::wireVfoWidget(VfoWidget* w, SliceModel* s)
     });
     // Record/playback — route to radio or client-side QsoRecorder (#1297)
     connect(w, &VfoWidget::recordToggled, this, [this, w, sliceId](bool on) {
-        bool clientSide = AppSettings::instance().value("RecordingMode", "Radio").toString() == "Client";
+        bool clientSide = AppSettings::instance().value("RecordingMode", "Client").toString() == "Client";
         if (clientSide) {
             if (on)
                 m_qsoRecorder->startRecording();
@@ -3174,7 +3244,7 @@ void MainWindow::wireVfoWidget(VfoWidget* w, SliceModel* s)
     });
     // Client-side playback
     connect(w, &VfoWidget::playToggled, this, [this, sliceId](bool on) {
-        bool clientSide = AppSettings::instance().value("RecordingMode", "Radio").toString() == "Client";
+        bool clientSide = AppSettings::instance().value("RecordingMode", "Client").toString() == "Client";
         if (clientSide) {
             if (on)
                 m_qsoRecorder->startPlayback();
@@ -3287,11 +3357,13 @@ void MainWindow::wireVfoWidget(VfoWidget* w, SliceModel* s)
     // WFM is toggled from the spectrum overlay DAX menu (wired in the per-pan
     // setup beside daxIqChannelChanged), not the flag — no connect here. (#3853)
 
-    // AetherDSP button on the per-slice DSP tab — same entry point as the
-    // Settings menu action and the RX chain double-click; reuses the
-    // existing modeless m_dspDialog when one is already open.
+    // AetherDSP button on the per-slice DSP tab — toggles the modeless
+    // m_dspDialog (press to open, press again to close) so it matches its
+    // sibling AetherVoice button instead of being a one-way launcher (#3877).
+    // The Settings menu action and the RX chain double-click keep pure open
+    // semantics by calling ensureAetherDspDialog() directly.
     connect(w, &VfoWidget::aetherDspRequested, this, [this] {
-        ensureAetherDspDialog();
+        toggleAetherDspDialog();
     });
 
     // Accent the ADSP launcher whenever any client-side NR module is active, so
@@ -3303,16 +3375,17 @@ void MainWindow::wireVfoWidget(VfoWidget* w, SliceModel* s)
         auto syncAetherDsp = [this, w] {
             if (!m_audio) return;
             const bool active = m_audio->nr2Enabled() || m_audio->nr4Enabled()
-                             || m_audio->mnrEnabled() || m_audio->bnrEnabled()
-                             || m_audio->dfnrEnabled() || m_audio->rn2Enabled();
+                             || m_audio->mnrEnabled()
+                             || m_audio->dfnrEnabled() || m_audio->rn2Enabled()
+                             || m_audio->nvAfxEnabled();
             w->setAetherDspActive(active);
         };
         connect(m_audio, &AudioEngine::nr2EnabledChanged,  w, [syncAetherDsp](bool){ syncAetherDsp(); });
         connect(m_audio, &AudioEngine::nr4EnabledChanged,  w, [syncAetherDsp](bool){ syncAetherDsp(); });
         connect(m_audio, &AudioEngine::mnrEnabledChanged,  w, [syncAetherDsp](bool){ syncAetherDsp(); });
-        connect(m_audio, &AudioEngine::bnrEnabledChanged,  w, [syncAetherDsp](bool){ syncAetherDsp(); });
         connect(m_audio, &AudioEngine::dfnrEnabledChanged, w, [syncAetherDsp](bool){ syncAetherDsp(); });
         connect(m_audio, &AudioEngine::rn2EnabledChanged,  w, [syncAetherDsp](bool){ syncAetherDsp(); });
+        connect(m_audio, &AudioEngine::nvAfxEnabledChanged, w, [syncAetherDsp](bool){ syncAetherDsp(); });
         syncAetherDsp();  // apply current state to this freshly-wired slice
     }
 
@@ -3406,12 +3479,26 @@ void MainWindow::wireMeters()
             && (!m_kiwiSdrManager
                 || m_kiwiSdrManager
                        ->assignedProfileForSlice(sliceIndex).isEmpty())) {
-            m_appletPanel->sMeterWidget()->setLevel(dbm);
+            deferReceivePresentation(
+                ReceivePresentationSource::Flex,
+                ReceivePresentationSurface::Meter,
+                [this, sliceIndex, dbm]() {
+                    if (!m_appletPanel
+                        || sliceIndex != m_activeSliceId
+                        || (m_kiwiSdrManager
+                            && !m_kiwiSdrManager
+                                    ->assignedProfileForSlice(sliceIndex)
+                                    .isEmpty())) {
+                        return;
+                    }
+                    m_appletPanel->sMeterWidget()->setLevel(dbm);
 #ifdef HAVE_HIDAPI
-            m_tmate2SmeterDbm = dbm;
-            updateTMate2Display();
-            updateTMate2Indicators();
+                    m_tmate2SmeterDbm = dbm;
+                    updateTMate2Display();
+                    updateTMate2Indicators();
 #endif
+                },
+                QString::number(sliceIndex));
         }
     });
     // Symmetric with the amp-side guard at line ~3654 and the PGXL TCP path

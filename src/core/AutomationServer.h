@@ -6,16 +6,17 @@
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <QMutex>
+#include <QJsonObject>
 #include <QString>
 
 #include <deque>
+#include <functional>
 #include <memory>
 #include <vector>
 
 class QLocalServer;
 class QLocalSocket;
 class QWidget;
-class QJsonObject;
 class QTimer;
 
 namespace AetherSDR {
@@ -23,6 +24,7 @@ namespace AetherSDR {
 class RadioModel;
 class ConnectionPanel;
 class AudioEngine;
+class QsoRecorder;
 
 // In-app, agent-first automation bridge (issue #3646, Phases 0-1).
 //
@@ -48,22 +50,35 @@ class AudioEngine;
 //
 //   invoke <target> <action> [v]   -> drive a control deterministically:
 //                                     click / toggle / setChecked / setValue /
-//                                     setText / setCurrentText / setCurrentIndex.
-//                                     SAFETY: refuses any control marked as
-//                                     transmit-keying (markTxKeying() / the
-//                                     "aetherTxKeying" property — MOX/PTT, TUNE,
-//                                     ATU, CWX send, packet/APRS send) unless
-//                                     AETHER_AUTOMATION_ALLOW_TX is set, so the
-//                                     bridge can never key a live radio by
-//                                     accident. A button-scoped name heuristic
-//                                     is a logged fallback; setpoint
+//                                     setText / setCurrentText / setCurrentIndex /
+//                                     selectRow. SAFETY: refuses any control
+//                                     marked as transmit-keying (markTxKeying() /
+//                                     the "aetherTxKeying" property — MOX/PTT,
+//                                     TUNE, ATU, CWX send, packet/APRS send)
+//                                     unless AETHER_AUTOMATION_ALLOW_TX is set, so
+//                                     the bridge can never key a live radio by
+//                                     accident. A button-scoped name heuristic is
+//                                     a logged fallback, kept narrow (mox/ptt/
+//                                     transmit/cwx) so RX-only buttons like "Tune
+//                                     Now" aren't false-blocked (#3918); setpoint
 //                                     sliders/combos are never blocked.
+//   invoke <view> selectRow <n>    -> select row n of an item view (QTableWidget /
+//                                     QTreeWidget / QListWidget) so the dialog's
+//                                     row-scoped buttons (Tune/Edit/Remove/Disable)
+//                                     become drivable; echoes selectedRow[Text].
 //   get <model> [selector] [prop]  -> live JSON snapshot of a model:
-//                                     audio | radio | transmit |
+//                                     audio | dsp | radio | transmit |
 //                                     slice <id|active|tx> | slices |
-//                                     pan <panId|active> | pans. With a trailing
-//                                     property name, returns just that field.
+//                                     pan <panId|active> | pans |
+//                                     kiwi. With a trailing property name,
+//                                     returns just that field.
 //                                     Assert on state without screenshots.
+//                                     `dsp` is the client-side AetherDSP state:
+//                                     the six AudioEngine noise-reduction modules
+//                                     (NR2/NR4/MNR/DFNR/RN2/BNR) with active
+//                                     method, per-module enabled/available, and
+//                                     tuning values — the client-side counterpart
+//                                     to the radio-side nr/nb/anf in `get slice`.
 //   connect list                   -> list currently discovered local radios
 //   connect show                   -> show/raise the Connect to Radio dialog
 //   connect hide                   -> hide the Connect to Radio dialog
@@ -102,6 +117,11 @@ class AudioEngine;
 //   resize <w> <h> [target]        -> resize a top-level window (default full
 //                                     size) so the panadapter x_pixels reaches a
 //                                     realistic value for headless render tests.
+//   window <state> [target]        -> drive a window's state: maximize | restore
+//                                     | minimize | fullscreen. resize only set
+//                                     explicit geometry, so an un-maximize was
+//                                     unprovable; dumpTree now carries
+//                                     `windowState` to assert it (#3918).
 //   menu list | menu open <name>   -> enumerate the menu bar / pop a menu for a
 //                                     follow-up grab/dumpTree.
 //   whoami                         -> {pid, socket, label, station} — identify
@@ -127,6 +147,11 @@ class AudioEngine;
 //                                     posted onto the GUI loop with the window
 //                                     raised (crash-safe on backgrounded macOS).
 //                                     `openMenu` is an alias.
+//   contextMenu <target> [x y]     -> trigger a custom right-click context menu
+//                                     (CustomContextMenu / overridden
+//                                     contextMenuEvent) via a synthesized
+//                                     QContextMenuEvent; deferred, then dumpTree
+//                                     to read it and invoke to drive it.
 //   pan add                        -> create a new panadapter (panafall); the
 //                                     only UI path is an unaddressable QLabel.
 //   pan close <id|index|active|all>-> tear down a panadapter regardless of how it
@@ -135,7 +160,12 @@ class AudioEngine;
 //   dumpTree (extended)            -> nodes now carry toolTip, and QComboBox
 //                                     nodes carry items[]/currentIndex and pans
 //                                     carry panIndex, all assertable without
-//                                     stepping a control.
+//                                     stepping a control. A checkable button
+//                                     also carries its text + a checked bool, so
+//                                     the six DSP method buttons (NR2 … BNR) are
+//                                     identifiable and readable from the tree
+//                                     instead of every one reporting only
+//                                     "checked"/"unchecked" (#3856).
 //
 // Requests are newline-delimited. Each line is either a bare command
 // ("dumpTree", "grab SpectrumWidget /tmp/pan.png", "invoke masterVolume
@@ -170,11 +200,26 @@ public:
     // "no radio model" rather than crashing).
     void setRadioModel(RadioModel* model) { m_radioModel = model; }
     void setAudioEngine(AudioEngine* audio) { m_audioEngine = audio; }
+    // QSO recorder handle for the record() verb (start/stop/status/path).
+    void setQsoRecorder(QsoRecorder* rec) { m_qsoRecorder = rec; }
     // Real connection dialog hook for the connect/disconnect verbs. The bridge
     // asks ConnectionPanel to emit the same signals the visible buttons do, so
     // automation exercises the normal MainWindow/RadioModel connection path.
     void setConnectionPanel(ConnectionPanel* panel) { m_connectionPanel = panel; }
     void setConnectionDialogHost(QObject* host) { m_connectionDialogHost = host; }
+    void setSliceReceiveSourceHandler(
+        std::function<QJsonObject(const QString&)> handler)
+    {
+        m_sliceReceiveSourceHandler = std::move(handler);
+    }
+    void setReceiveSyncSnapshotHandler(std::function<QJsonObject()> handler)
+    {
+        m_receiveSyncSnapshotHandler = std::move(handler);
+    }
+    void setKiwiSdrSnapshotHandler(std::function<QJsonObject()> handler)
+    {
+        m_kiwiSdrSnapshotHandler = std::move(handler);
+    }
 
 private slots:
     void onNewConnection();
@@ -224,6 +269,13 @@ private:
     // popup from inside the socket-read callback re-enters Cocoa and segfaults on
     // a backgrounded macOS instance. (#3646 fidelity)
     QJsonObject doShowMenu(const QString& target) const;
+    // contextMenu <target> [x y]: trigger a widget's custom right-click context
+    // menu by synthesizing a QContextMenuEvent (routed through event() so the
+    // CustomContextMenu / overridden contextMenuEvent paths both fire). Posted
+    // onto the GUI loop with the owning window raised, like showMenu, because the
+    // handler pops a QMenu that runs its own event loop. The popped menu is read
+    // via dumpTree and driven via invoke, no extra inspection code needed. (#3858)
+    QJsonObject doContextMenu(const QString& target, const QString& value) const;
     // pan close <panId|index|active|all>: tear down a panadapter regardless of
     // how it was opened. Sends `display pan remove` AND `display panafall remove`
     // (the FlexLib-correct pair) so a panafall-created pan closes too. The
@@ -237,13 +289,30 @@ private:
     //                     (pans + waterfalls) classified ours/foreign/orphan,
     //                     plus leaked waterfalls (parent pan gone) — catches the
     //                     resource-level lingering Layer A can't see.
+    //   streams resync  — re-subscribe (sub pan all) to force the radio to
+    //                     re-dump every allocated display object, refreshing the
+    //                     Layer-B maps to the radio's present-tense set; re-poll
+    //                     `streams radio` after it settles to confirm a lingering
+    //                     waterfall the client view had already purged.
     //   streams reset   — clear the Layer-A orphan tally to re-baseline.
     QJsonObject doStreams(const QString& action);
+    QJsonObject doAudioCapture(const QString& action,
+                               const QString& arg,
+                               const QString& path) const;
     QJsonObject doGet(const QString& model, const QString& selector,
                       const QString& property) const;
     QJsonObject doConnect(const QString& action, const QString& arg, QLocalSocket* sock);
     QJsonObject doConnectDialog(const QString& action);
     QJsonObject doDisconnect();
+    // record start|stop|status|path|dir <path> — drive the Client-Side QSO
+    // recorder, read the WAV path, or point recordings at a path (for live
+    // capture-file verification on TCC-restricted boxes).
+    QJsonObject doRecord(const QString& action, const QString& value);
+    // testtone on [freqHz] [levelDb] | off — drive the client-side TX test tone
+    // through onTxAudioReady so a recording gets a deterministic "phone" segment
+    // (verifies SSB<->CW switching while recording). The actual transmit still
+    // requires a separately-gated key/MOX.
+    QJsonObject doTestTone(const QString& action, const QString& value);
     QJsonObject doConnectWait(int timeoutMs, QLocalSocket* sock);
     struct ConnectWait;
     void finishConnectWait(const std::shared_ptr<ConnectWait>& wait, bool timedOut);
@@ -276,6 +345,14 @@ private:
     // Resize a top-level window so the panadapter x_pixels (== SpectrumWidget
     // width) propagates to a realistic value for headless render-size fidelity.
     QJsonObject doResize(const QString& value, const QString& target) const;
+    // window <maximize|restore|minimize|fullscreen> [target]: drive a top-level
+    // window's state (resize only ever set explicit geometry, so an un-maximize
+    // was unverifiable). dumpTree now also carries `windowState`. (#3918)
+    QJsonObject doWindow(const QString& action, const QString& target) const;
+    // Resolve the top-level window a window-scoped verb (resize/window) acts on:
+    // the target's window() if given, else the QMainWindow (or first visible real
+    // top-level). Shared by doResize and doWindow.
+    static QWidget* topLevelWindowForTarget(const QString& target);
     // Menu-bar discovery/popup (#3646 fidelity): `menu list` enumerates the
     // menu-bar tree; `menu open <name>` pops a top-level menu for grab/dumpTree.
     QJsonObject doMenu(const QString& action, const QString& arg) const;
@@ -302,8 +379,12 @@ private:
     QHash<QLocalSocket*, QByteArray> m_buffers;  // per-client read buffer
     QPointer<RadioModel> m_radioModel;           // for get(); may be null
     QPointer<AudioEngine> m_audioEngine;          // for get audio; may be null
+    QPointer<QsoRecorder> m_qsoRecorder;          // for record(); may be null
     QPointer<ConnectionPanel> m_connectionPanel;  // for connect/disconnect verbs
     QPointer<QObject> m_connectionDialogHost;    // MainWindow show/hide invokables
+    std::function<QJsonObject(const QString&)> m_sliceReceiveSourceHandler;
+    std::function<QJsonObject()> m_receiveSyncSnapshotHandler;
+    std::function<QJsonObject()> m_kiwiSdrSnapshotHandler;
 
     // Agent station identity (#3646). The bridge sets the per-GUI-client station
     // name to the agent's name on connect and restores the user's real name on
