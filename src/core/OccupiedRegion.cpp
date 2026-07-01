@@ -31,16 +31,21 @@ namespace {
     // isn't the SSB voice we're tuned to -> reject -> caller keeps the manual
     // filter. Generous (well above any real voice low-cut, well below 1600).
     constexpr int    kMaxVoiceLowCutHz = 600;
-    // Splatter rejection by strength (RFC follow-up). (a) Anchor the wanted
-    // signal's peak to the carrier core (within this distance) so a much-STRONGER
-    // adjacent station farther out can't become the peak and disable the gap
-    // logic — it MUST be narrower than the closest plausible neighbour separation,
-    // and voice energy is densest near the carrier anyway. (b) Past the peak, a
-    // gap whose far side resumes to a plateau >= kReboundDb above the in-band
-    // reference is a DISTINCT lobe (a separate/splatter station) — cut the
-    // high-cut at the valley rather than bridging into it.
-    constexpr double kVoicePeakHz   = 1500.0;
-    constexpr float  kReboundDb     = 8.0f;
+    // Connected run + separate-station rejection (RFC follow-up). The wanted
+    // signal is the contiguous energy from the carrier that never returns to the
+    // noise floor — ONE signal whatever its spectral tilt. A floor-reaching gap of
+    // >= kFloorDiscHz is a real DISCONNECTION (the run boundary); a shallower or
+    // merely relative dip is bridged. Past such a disconnection, energy that climbs
+    // to a plateau >= kReboundDb above the in-band reference is a DISTINCT lobe (a
+    // separate/splatter station) and the high-cut is cut at the valley. Anchoring
+    // the peak/reference to the whole run (not a near-carrier window) is what keeps
+    // a treble-dominant signal's dominant hump from being read as a neighbour.
+    constexpr float  kReboundDb    = 8.0f;
+    constexpr double kFloorDiscHz  = 250.0;  // floor-reaching gap this wide = a
+                                             // real disconnection (run boundary)
+    constexpr int    kReferencePct = 75;     // in-band reference = this percentile
+                                             // of the connected run (tracks a
+                                             // treble hump; robust to a transient)
     constexpr int    kMarginHz      = 150;    // intelligibility margin
     constexpr int    kMinBwHz       = 50;     // never narrower than this
     // Temporal averaging (video averaging): per-offset envelope EMA coefficient.
@@ -68,25 +73,17 @@ namespace {
     constexpr int    kFloorPercentile = 20;      // low pct over the window
     constexpr float  kFloorTiltMaxDb  = 10.0f;   // curve may rise at most this far
 
-    // ── In-band reference + splatter cap (spec Stages F.2, G) ───────────────
-    // referenceDbm = median of the confirmed-core occupied bins within kCoreRefHz
-    // of the inner edge (a MEDIAN, not the peak — so it is loudness-stable and
-    // does not reintroduce the inner-edge creep that a peak-relative threshold
-    // caused).
-    //
+    // ── Splatter cap (spec Stages F.2, G) ───────────────────────────────────
     // The natural high-cut is where the signal returns to the noise floor (the
     // scan's far edge). For NORMAL voice that is the correct answer and must be
-    // trusted: real SSB voice has more energy low and rolls off gradually, so the
-    // upper voice legitimately sits 20-25 dB below the loud near-carrier core — a
-    // bare referenceDbm - kSplatterDownDb cut would chop useful audio (it cut a
-    // ~3 kHz signal to ~1.8 kHz on air). So the reference-relative splatter cap is
-    // applied ONLY when the floor crossing runs past kSplatterGuardHz, i.e. the
-    // signal never returns to the floor within the plausible voice band — the
-    // signature of a dirty, over-driven splatterer. Inside the band the floor
-    // crossing wins; beyond it the cap pulls the edge back to the useful core.
+    // trusted: real SSB voice rolls off gradually, so the upper voice legitimately
+    // sits 20-25 dB below the core — a bare referenceDbm - kSplatterDownDb cut
+    // would chop useful audio (it cut a ~3 kHz signal to ~1.8 kHz on air). So the
+    // reference-relative splatter cap is applied ONLY when the floor crossing runs
+    // past kSplatterGuardHz, i.e. the signal never returns to the floor within the
+    // plausible voice band — the signature of a dirty, over-driven splatterer.
     // kSplatterDownDb / kSplatterGuardHz are operator-tunable via the Splatter-
     // rejection setting — see OccupiedRegionParams.
-    constexpr double kCoreRefHz       = 1500.0;
 
     // ── Sharp-edge precision (spec Stage G) ─────────────────────────────────
     // Where a clear steep transition exists (modern DSP rigs have near-vertical
@@ -196,24 +193,6 @@ OccupiedRegion measureOccupiedRegion(const QVector<float>& binsDbm,
     }
     const auto floorAt = [&](int o) -> float { return floorCurve[o]; };
 
-    // Envelope peak — the representative voice level (not a spike). Search only
-    // the near-carrier window (~kVoicePeakHz): SSB voice energy is concentrated
-    // close to the carrier, so this anchors the reference on the WANTED signal
-    // and prevents a much-stronger adjacent station farther out from hijacking
-    // the threshold (which would otherwise exclude the wanted signal).
-    const int peakSearchBins = std::min(scanBins,
-                                        static_cast<int>(kVoicePeakHz / hzPerBin));
-    int   peakO   = 0;
-    float envPeak = envAt(0);
-    for (int o = 1; o <= peakSearchBins; ++o) {
-        const float v = envAt(o);
-        if (v > envPeak) { envPeak = v; peakO = o; }
-    }
-    // Presence gate on the GLOBAL scalar floor (not the per-bin curve): the
-    // scalar is the robust band-wide noise estimate, so weak-signal engagement is
-    // identical to the pre-curve behaviour. The curve only refines edge placement.
-    if (envPeak < scalarFloor + params.minPeakDb) return r;  // weak / ambiguous
-
     // Occupied threshold: FLOOR-relative (a fixed margin above the per-bin noise
     // floor). It must NOT be peak-relative — the TX filter edge is fixed, but a
     // peak-relative threshold rises/falls with the speaker's loudness, so the
@@ -225,24 +204,55 @@ OccupiedRegion measureOccupiedRegion(const QVector<float>& binsDbm,
     const auto floorGateAt = [&](int o) -> float { return floorAt(o) + kSignalGateDb; };
     const int  silBins    = std::max(1, static_cast<int>(kSilenceHz / hzPerBin));
 
-    // ── In-band reference (Stage F/G): median of the confirmed-core bins ────
-    // Find the inner edge (first occupied bin) and take the median envelope over
-    // the occupied bins within kCoreRefHz of it. A MEDIAN (not the peak) keeps
-    // the reference loudness-stable, so the reference-relative outer logic does
-    // not reintroduce inner-edge creep.
+    // Inner edge: the first bin clearing the floor-relative occupied gate.
     int firstO = -1;
-    for (int o = 0; o <= scanBins; ++o) {
+    for (int o = 0; o <= scanBins; ++o)
         if (envAt(o) >= occThrAt(o)) { firstO = o; break; }
-    }
     if (firstO < 0) return r;  // nothing occupied above the floor-relative gate
-    const int coreBins = std::max(1, static_cast<int>(kCoreRefHz / hzPerBin));
-    QVector<float> coreVals;
-    for (int o = firstO; o <= std::min(scanBins, firstO + coreBins); ++o)
-        if (envAt(o) >= occThrAt(o)) coreVals.append(envAt(o));
-    float referenceDbm = envPeak;  // fallback if the core is too thin
-    if (coreVals.size() >= 3) {
-        std::sort(coreVals.begin(), coreVals.end());
-        referenceDbm = coreVals[coreVals.size() / 2];
+
+    // ── Connected run + in-band reference (Stage F/G, tilt-robust) ──────────
+    // The wanted signal is the contiguous energy from the carrier that never
+    // returns to the noise floor. Bridge relative dips (formant nulls, the valley
+    // between a bass and a treble hump); stop at the first floor-reaching gap of
+    // kFloorDiscHz — a real disconnection. Anchor the PEAK and the in-band
+    // REFERENCE to THIS run, not a fixed near-carrier window, so both reflect the
+    // signal's real level even when the energy peaks well above the carrier
+    // (treble-dominant voice) — otherwise a strong high hump read far above a
+    // carrier-anchored reference and got cut as if it were a neighbour.
+    const int floorDiscBins = std::max(1, static_cast<int>(kFloorDiscHz / hzPerBin));
+    int connEndO = firstO;
+    for (int o = firstO, floorRun = 0; o <= scanBins; ++o) {
+        const float v = envAt(o);
+        if (v >= occThrAt(o))        { connEndO = o; floorRun = 0; }
+        else if (v < floorGateAt(o)) { if (++floorRun >= floorDiscBins) break; }
+        else                         { floorRun = 0; }   // relative dip -> bridge
+    }
+
+    // Peak over the connected run (drives the gap logic + presence gate). Because
+    // the peak now lands on the dominant hump wherever it sits, the energy up to it
+    // is bridged and a treble hump is captured instead of being cut before it.
+    int   peakO   = firstO;
+    float envPeak = envAt(firstO);
+    for (int o = firstO; o <= connEndO; ++o)
+        if (envAt(o) > envPeak) { envPeak = envAt(o); peakO = o; }
+
+    // Presence gate on the GLOBAL scalar floor (unchanged behaviour): the scalar is
+    // the robust band-wide noise estimate, so weak-signal engagement is identical.
+    if (envPeak < scalarFloor + params.minPeakDb) return r;  // weak / ambiguous
+
+    // Reference = a HIGH percentile of the occupied bins across the connected run.
+    // High (not the median) so it tracks the signal's level when a treble hump
+    // dominates; a percentile (not the peak) so a lone transient het — a tiny
+    // fraction of the run's bins — cannot inflate it.
+    QVector<float> runVals;
+    for (int o = firstO; o <= connEndO; ++o)
+        if (envAt(o) >= occThrAt(o)) runVals.append(envAt(o));
+    float referenceDbm = envPeak;  // fallback if the run is too thin
+    if (runVals.size() >= 3) {
+        std::sort(runVals.begin(), runVals.end());
+        const int idx = std::clamp(kReferencePct * (static_cast<int>(runVals.size()) - 1) / 100,
+                                   0, static_cast<int>(runVals.size()) - 1);
+        referenceDbm = runVals[idx];
     }
     const float splatterLevel = referenceDbm - params.splatterDownDb;
 
@@ -267,7 +277,7 @@ OccupiedRegion measureOccupiedRegion(const QVector<float>& binsDbm,
     // kSplatterDownDb of the in-band reference — the reference-relative cap that
     // excludes a slowly-decaying splatter tail (Stage F.2).
     int nearO = firstO, farO = firstO, splatterO = firstO;
-    bool  inGap = false;
+    bool  inGap = false, gapHitFloor = false;
     // Look-ahead span for the gap-exit plateau test (below): the envelope ramps
     // over ~envHalf bins, so the first re-occupied bin still reads near the gap
     // level; peek a couple bins further to see the level the signal resumes to.
@@ -275,15 +285,17 @@ OccupiedRegion measureOccupiedRegion(const QVector<float>& binsDbm,
     for (int o = nearO, silence = 0; o <= scanBins; ++o) {
         const float v = envAt(o);
         if (v >= occThrAt(o)) {
-            // Resumption after a gap that climbs to a PLATEAU more than kReboundDb
-            // above the in-band REFERENCE is a separate, stronger station — stop
-            // before it. Peeking the plateau (not just the first ramp bin, which
-            // the envelope average still holds low) makes the neighbour visible;
-            // comparing to the reference (not a transitional pre-gap sample) is
-            // robust to the ramp and to envelope blur across a narrow valley. A
-            // fade of the wanted signal recovers only to ~its reference, so it
-            // bridges; only a genuinely louder lobe trips the cut.
-            if (inGap && o > peakO) {
+            // Separate-stronger-station cut — but ONLY across a real DISCONNECTION
+            // (a gap that returned to the noise floor). A RELATIVE dip that stayed
+            // above the floor is the valley between two humps of ONE spectrally-
+            // tilted signal (e.g. a treble-dominant voice whose energy peaks well
+            // above the carrier), so it bridges and the far hump is kept — instead
+            // of being chopped as if it were a neighbour. A genuine adjacent station
+            // is still separated by a floor-reaching valley, so it is still cut.
+            // The plateau look-ahead (not just the first ramp bin, which the
+            // envelope average holds low) makes the resumed level visible; comparing
+            // to the in-band reference keeps a same-level fade recovery bridging.
+            if (inGap && o > peakO && gapHitFloor) {
                 float plateau = v;
                 for (int k = o + 1; k <= std::min(scanBins, o + reboundLook); ++k)
                     plateau = std::max(plateau, envAt(k));
@@ -291,12 +303,12 @@ OccupiedRegion measureOccupiedRegion(const QVector<float>& binsDbm,
             }
             farO = o;
             if (v >= splatterLevel) splatterO = o;
-            inGap = false;
+            inGap = false; gapHitFloor = false;
             silence = 0;
         } else if (o > peakO) {
             inGap = true;
             if (v >= floorGateAt(o)) silence = 0;
-            else if (++silence > silBins) break;
+            else { gapHitFloor = true; if (++silence > silBins) break; }
         }
     }
     // ── Outer-edge refinement (Stage F.2 / G) ───────────────────────────────

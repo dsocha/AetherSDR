@@ -251,6 +251,28 @@ int main()
                r.valid && r.highHz >= 2700 && r.highHz <= 3300, d);
     });
 
+    // ── 11. Treble-dominant signal — dominant high hump captured ────────────
+    forEachMode([](bool usb) {
+        // Weak near-carrier energy, a dip below the occupied gate, then a STRONG
+        // high-frequency hump (the wanted signal's energy peaks well above the
+        // carrier). The hump must be captured — not cut off as if it were a louder
+        // neighbour (which chopped a ~3 kHz signal to the 1.8 kHz floor on air).
+        const auto sig = [](double f) -> float {
+            if (f < 300)   return -1000.0f;
+            if (f <= 1100) return -92.0f;     // weak near-carrier
+            if (f <= 1500) return -116.0f;    // relative dip (near, not at, floor)
+            if (f <= 2900) return -74.0f;     // dominant high hump
+            return -1000.0f;
+        };
+        const auto bins = buildSpectrum(usb, -120.0f, 0.0f, sig);
+        const OccupiedRegion r = measure(bins, usb, -120.0f);
+        char d[96];
+        std::snprintf(d, sizeof d, "  [%s] low=%d high=%d ref=%.1f",
+                      tag(usb), r.lowHz, r.highHz, r.referenceDbm);
+        report("treble-dominant: high hump captured (not cut before it)",
+               r.valid && r.highHz > 2500, d);
+    });
+
     std::printf("\n%s (%d failure%s)\n",
                 g_failed ? "FAILED" : "PASSED",
                 g_failed, g_failed == 1 ? "" : "s");
