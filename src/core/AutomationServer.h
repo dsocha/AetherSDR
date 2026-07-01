@@ -69,8 +69,9 @@ class QsoRecorder;
 //   get <model> [selector] [prop]  -> live JSON snapshot of a model:
 //                                     audio | dsp | radio | transmit |
 //                                     slice <id|active|tx> | slices |
-//                                     pan <panId|active> | pans. With a trailing
-//                                     property name, returns just that field.
+//                                     pan <panId|active> | pans |
+//                                     kiwi. With a trailing property name,
+//                                     returns just that field.
 //                                     Assert on state without screenshots.
 //                                     `dsp` is the client-side AetherDSP state:
 //                                     the six AudioEngine noise-reduction modules
@@ -214,6 +215,10 @@ public:
     void setReceiveSyncSnapshotHandler(std::function<QJsonObject()> handler)
     {
         m_receiveSyncSnapshotHandler = std::move(handler);
+    }
+    void setKiwiSdrSnapshotHandler(std::function<QJsonObject()> handler)
+    {
+        m_kiwiSdrSnapshotHandler = std::move(handler);
     }
 
 private slots:
@@ -379,6 +384,7 @@ private:
     QPointer<QObject> m_connectionDialogHost;    // MainWindow show/hide invokables
     std::function<QJsonObject(const QString&)> m_sliceReceiveSourceHandler;
     std::function<QJsonObject()> m_receiveSyncSnapshotHandler;
+    std::function<QJsonObject()> m_kiwiSdrSnapshotHandler;
 
     // Agent station identity (#3646). The bridge sets the per-GUI-client station
     // name to the agent's name on connect and restores the user's real name on

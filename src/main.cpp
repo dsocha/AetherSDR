@@ -439,6 +439,10 @@ int main(int argc, char* argv[])
                 [&window]() {
                     return window.automationReceiveSyncSnapshot();
                 });
+            automation->setKiwiSdrSnapshotHandler(
+                [&window]() {
+                    return window.automationKiwiSdrSnapshot();
+                });
             if (!automation->start(sockName))
                 automation.reset();
         }
