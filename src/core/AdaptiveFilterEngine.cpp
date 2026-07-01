@@ -227,6 +227,14 @@ void AdaptiveFilterEngine::processFrame(SliceModel* slice, double centerMhz,
         measureParams(slice->adaptiveMinSnr(), slice->adaptiveSplatter());
     const ResponseTuning resp = responseTuning(slice->adaptiveResponse());
 
+    // While idle (no confident fit — reverted to the operator's baseline), keep
+    // the temporal average fresh so a signal returning after a dropout is captured
+    // at full width on its FIRST frame, like right after a tune. Otherwise the EMA
+    // (persisted from the dropout at the noise floor) has to climb back up over
+    // ~1 s, so the fit re-engages slowly and narrow. active stays true through
+    // brief speech pauses (HOLD), so this does not disturb pause-riding.
+    if (!st.active) st.avgEnv.clear();
+
     // ── Measure (single-signal edge-finder; see OccupiedRegion.cpp) ──────────
     const OccupiedRegion reg = measureOccupiedRegion(
         binsDbm, centerMhz, bandwidthMhz, slice->frequency(), mode, noiseFloorDbm,
