@@ -10841,6 +10841,10 @@ void SpectrumWidget::drawSmartMtrValueLabels(QPainter& p)
     }
 }
 
+// TODO(a11y): QAccessibleInterface needed — the adaptive-filter markers drawn
+// here (edge triangles, audio low/high cut labels, AUTO status ball) are
+// data-bearing content a screen reader can't introspect. Expose via a
+// SpectrumWidget QAccessibleInterface. Tracked in aethersdr/AetherSDR#3957.
 void SpectrumWidget::drawSliceMarkers(QPainter& p, const QRect& specRect, const QRect& wfRect)
 {
     const double startMhz = m_centerMhz - m_bandwidthMhz / 2.0;
