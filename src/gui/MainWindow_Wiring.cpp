@@ -990,6 +990,13 @@ void MainWindow::onSliceRemoved(int id)
         m_kiwiSdrManager->clearSliceAssignment(id);
     }
 
+    // Drop the adaptive-filter engine's per-slice smoothing/baseline state.
+    // processFrame() only self-clears state for slices it still sees; a deleted
+    // slice is never seen again, so without this a recreated slice reusing the
+    // same id inherits the closed slice's baseline/fit (RFC #3878).
+    if (m_adaptiveFilterEngine)
+        m_adaptiveFilterEngine->resetSlice(id);
+
 #ifdef HAVE_RADE
     // If the RADE slice was closed, deactivate RADE
     if (id == m_radeSliceId)
